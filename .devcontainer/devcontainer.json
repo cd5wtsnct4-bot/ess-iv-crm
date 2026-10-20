@@ -1,0 +1,13 @@
+{
+  "name": "ESS IV CRM live demo",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/ess-iv-crm",
+  "forwardPorts": [80, "mail:8025"],
+  "portsAttributes": {
+    "80": { "label": "ESS IV CRM", "onAutoForward": "openBrowser" },
+    "mail:8025": { "label": "Demo mailbox (all alert emails)", "onAutoForward": "notify" }
+  },
+  "postStartCommand": "bash .devcontainer/start.sh",
+  "customizations": { "codespaces": { "openFiles": ["README.md"] } }
+}

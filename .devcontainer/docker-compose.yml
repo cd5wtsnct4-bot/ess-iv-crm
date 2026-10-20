@@ -1,0 +1,24 @@
+# Live demo stack for GitHub Codespaces: PHP/Apache + MySQL + Mailpit (catches all emails).
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - ..:/workspaces/ess-iv-crm:cached
+    depends_on:
+      - db
+      - mail
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ess4crm
+      MYSQL_USER: ess4crm
+      MYSQL_PASSWORD: demo-db-password
+      MYSQL_ROOT_PASSWORD: demo-root-password
+    volumes:
+      - dbdata:/var/lib/mysql
+  mail:
+    image: axllent/mailpit:v1.20
+volumes:
+  dbdata:

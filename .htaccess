@@ -1,0 +1,20 @@
+# ESS IV CRM — Apache rules (cPanel / shared hosting)
+Options -Indexes
+DirectoryIndex index.php
+
+# Never serve configuration, lock, SQL or documentation files.
+<FilesMatch "^(config\.php|config\.sample\.php|install\.lock|DEPLOY\.md|README\.md)$|\.(sql|log|lock)$">
+  Require all denied
+</FilesMatch>
+
+# Long cache for versioned assets.
+<IfModule mod_expires.c>
+  ExpiresActive On
+  ExpiresByType text/css "access plus 30 days"
+  ExpiresByType application/javascript "access plus 30 days"
+</IfModule>
+
+# Uncomment to force HTTPS once your SSL certificate is installed:
+# RewriteEngine On
+# RewriteCond %{HTTPS} !=on
+# RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
