@@ -9,7 +9,68 @@ declare(strict_types=1);
  *    check-in, check-out, cancellation, room offline/back, maintenance ticket...).
  */
 
+require_once __DIR__ . '/ops.php';
+
 const PRIO_DAYS = ['Critical' => 1, 'High' => 3, 'Medium' => 7, 'Low' => 14];
+
+/**
+ * Operations alerts (stock, food safety, cleaning, deliveries). Each group lists the access areas
+ * that may see it on the dashboard; emails go to the alert recipients regardless.
+ */
+function ops_alert_groups(): array
+{
+    $pdo = db();
+    $t = today();
+    $g = [];
+    $add = function (string $key, string $title, array $areas, string $link, array $head, array $items, bool $urgent = false) use (&$g) {
+        $g[$key] = ['title' => $title, 'areas' => $areas, 'link' => $link, 'head' => $head, 'items' => $items, 'urgent' => $urgent];
+    };
+    $rows = stock_alert_rows();
+    $sHead = ['Item', 'In stock', 'Reorder at', 'Outlook', 'Supplier'];
+    $sRow = fn($i) => [$i['name'], qty_fmt((float)$i['qty']) . ' ' . $i['unit'], qty_fmt((float)$i['reorder_level']) . ' ' . $i['unit'], cover_text($i['cover']), $i['supplier'] ?: '—'];
+    $pick = fn(bool $food, string $level) => array_values(array_filter($rows, fn($r) => $r['food'] === $food && $r['level'] === $level));
+    $add('food_low', 'Food shortages: below reorder level', ['catering', 'stock'], 'stock.php?dept=Kitchen&low=1', $sHead,
+        array_map(fn($i) => ['key' => "food_low:{$i['id']}:{$t}", 'cols' => $sRow($i)], $pick(true, 'low')), true);
+    $add('food_near', 'Food running low: close to reorder level', ['catering', 'stock'], 'stock.php?dept=Kitchen', $sHead,
+        array_map(fn($i) => ['key' => "food_near:{$i['id']}:{$t}", 'cols' => $sRow($i)], $pick(true, 'near')));
+    $add('stock_low', 'Supplies below reorder level (cleaning, amenities, spares)', ['stock', 'cleaning'], 'stock.php?low=1', $sHead,
+        array_map(fn($i) => ['key' => "stock_low:{$i['id']}:{$t}", 'cols' => $sRow($i)], $pick(false, 'low')), true);
+    $add('stock_near', 'Supplies close to reorder level', ['stock', 'cleaning'], 'stock.php', $sHead,
+        array_map(fn($i) => ['key' => "stock_near:{$i['id']}:{$t}", 'cols' => $sRow($i)], $pick(false, 'near')));
+
+    $st = $pdo->prepare('SELECT * FROM stock_items WHERE active = 1 AND qty > 0 AND expiry_date IS NOT NULL AND expiry_date <= ? ORDER BY expiry_date');
+    $st->execute([date('Y-m-d', strtotime('+3 days'))]);
+    $add('expiring', 'Stock expiring within 3 days', ['catering', 'stock'], 'stock.php', ['Item', 'In stock', 'Expires', 'Location'],
+        array_map(fn($i) => ['key' => "expiring:{$i['id']}:{$i['expiry_date']}", 'cols' => [$i['name'], qty_fmt((float)$i['qty']) . ' ' . $i['unit'], d_fmt($i['expiry_date']) . ' (' . rel_day($i['expiry_date']) . ')', $i['location']]], $st->fetchAll()), true);
+
+    $rowsK = $pdo->query('SELECT * FROM kitchen_checks WHERE ok = 0 AND checked_at >= NOW() - INTERVAL 1 DAY ORDER BY checked_at DESC')->fetchAll();
+    $add('temp_fail', 'Food-safety temperature failures (last 24 hours)', ['catering'], 'catering.php#checks', ['Equipment', 'Temperature', 'When', 'Action taken'],
+        array_map(fn($k) => ['key' => "temp_fail:{$k['id']}", 'cols' => [$k['equipment'], number_format((float)$k['temperature'], 1) . ' °C', date('D j M H:i', strtotime($k['checked_at'])), $k['action_taken']]], $rowsK), true);
+
+    $rowsC = $pdo->query('SELECT t.*, DATE_ADD(COALESCE(t.last_done, CURDATE() - INTERVAL 1 DAY), INTERVAL t.frequency_days DAY) next_due FROM cleaning_tasks t WHERE active = 1')->fetchAll();
+    $rowsC = array_values(array_filter($rowsC, fn($c) => $c['next_due'] < $t));
+    $add('clean_overdue', 'Cleaning overdue', ['cleaning'], 'cleaning.php#schedule', ['Area', 'Task', 'Was due', 'Assigned to'],
+        array_map(fn($c) => ['key' => "clean:{$c['id']}:{$t}", 'cols' => [$c['area'], $c['task'], d_fmt($c['next_due']) . ' (' . rel_day($c['next_due']) . ')', $c['assigned_to']]], $rowsC));
+
+    $st = $pdo->prepare("SELECT * FROM purchase_orders WHERE status = 'Ordered' AND expected_on < ? ORDER BY expected_on");
+    $st->execute([$t]);
+    $add('po_late', 'Deliveries overdue', ['stock', 'catering'], 'stock.php?view=orders', ['Order', 'Supplier', 'Expected', 'Value'],
+        array_map(fn($p) => ['key' => "po_late:{$p['id']}:{$t}", 'cols' => [$p['po_no'], $p['supplier'], d_fmt($p['expected_on']) . ' (' . rel_day($p['expected_on']) . ')', rands((float)$p['total'])]], $st->fetchAll()));
+    return $g;
+}
+
+/** The operations alerts a given user may see, shaped for the dashboard. */
+function ops_alerts_for(array $user): array
+{
+    $out = [];
+    foreach (ops_alert_groups() as $key => $g) {
+        if (!$g['items'] || !array_filter($g['areas'], fn($a) => can($user, $a))) {
+            continue;
+        }
+        $out[] = ['key' => $key, 'title' => $g['title'], 'link' => $g['link'], 'urgent' => $g['urgent'], 'head' => $g['head'], 'rows' => array_map(fn($i) => $i['cols'], $g['items'])];
+    }
+    return $out;
+}
 
 function d_fmt(?string $d): string
 {
@@ -86,6 +147,9 @@ function compute_alerts(): array
     }
     $add('pm_due', 'Preventive maintenance due', ['Task', 'Scope', 'Due', 'Owner'], $items);
 
+    foreach (ops_alert_groups() as $key => $og) {
+        $g[$key] = ['title' => $og['title'], 'head' => $og['head'], 'items' => $og['items']];
+    }
     return $g;
 }
 

@@ -189,3 +189,19 @@ table.pnl tr.net.pos td:nth-child(2){color:var(--vac)} table.pnl tr.net.neg td:n
 table.users td{vertical-align:top}
 .kpis.fin .v{font-size:24px;white-space:nowrap}
 .kpis.fin{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
+
+/* ---- operations pages ---- */
+main.ops{padding-block:18px 40px;display:flex;flex-direction:column;gap:18px}
+nav.subnav a{display:inline-block;padding:8px 12px;color:var(--muted);text-decoration:none;font-weight:500;border-bottom:2px solid transparent;white-space:nowrap}
+nav.subnav a[aria-current="page"]{color:var(--fg);border-bottom-color:var(--accent)}
+table.planner td{vertical-align:top;min-width:150px;font-size:12px}
+table.planner th{vertical-align:top}
+.today-col{background:var(--accent-soft)}
+.menu{margin:4px 0 6px;line-height:1.35}
+ul.plain{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:13px}
+.roomgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:6px}
+.roomchk{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--dirty-soft);cursor:pointer;font-size:12px}
+.roomchk input{width:auto}
+.roomchk small{flex-basis:100%;color:var(--muted);font-size:11px}
+.roomchk.urgent{border-color:var(--oos);border-width:2px}
+.bars .b i.fc{position:absolute;left:-1px;right:-1px;height:2px;background:var(--fg);display:block}

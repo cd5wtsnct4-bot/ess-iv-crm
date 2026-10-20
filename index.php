@@ -19,10 +19,12 @@ page_open('ESS IV Accommodation CRM');
       <div class="brand"><h1>ESS IV</h1><span>Accommodation CRM · 600 rooms</span></div>
       <span class="chip" id="modeChip">Connecting…</span>
       <span class="today" id="todayLbl"></span>
+      <button class="btn" id="bulkBtn">Bulk booking</button>
       <button class="btn primary" id="newBookingBtn">New reservation</button>
       <div class="usermenu">
         <span class="muted"><?= h($app['user']['name']) ?><?= $user['role'] === 'admin' ? ' · admin' : '' ?></span>
         <a class="btn sm" href="users.php"><?= $user['role'] === 'admin' ? 'Users' : 'My password' ?></a>
+        <?php if (can($user, 'catering') || can($user, 'stock') || can($user, 'cleaning')): ?><a class="btn sm" href="operations.php">Operations</a><?php endif ?>
         <?php if (can($user, 'finance')): ?><a class="btn sm" href="finance.php">Finance</a><?php endif ?>
         <?php if ($user['role'] === 'admin'): ?><a class="btn sm" href="settings.php">Email alerts</a><?php endif ?>
         <form method="post" action="logout.php"><input type="hidden" name="csrf" value="<?= h($app['csrf']) ?>"><button class="btn sm">Sign out</button></form>
@@ -35,6 +37,7 @@ page_open('ESS IV Accommodation CRM');
       <button role="tab" data-tab="desk">Check-in / Check-out</button>
       <button role="tab" data-tab="rooms">Room status</button>
       <button role="tab" data-tab="maint">Maintenance</button>
+      <button role="tab" data-tab="guests">Guests</button>
     </nav>
   </div>
 </header>

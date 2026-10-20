@@ -50,7 +50,9 @@ try {
     if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         if ($action === 'state') {
             $AFTER = fn() => maybe_run_alerts();
-            respond(load_state($user));
+            $state = load_state($user);
+            $state['ops'] = ops_alerts_for($user);
+            respond($state);
         }
         throw new ApiError('Unknown request.', 404);
     }
@@ -71,7 +73,19 @@ try {
             $data = is_array($in['data'] ?? null) ? $in['data'] : [];
             $also = [];
             $rec = save_record((string)($in['coll'] ?? ''), (string)($in['id'] ?? ''), $data, (string)($in['mode'] ?? 'set'), $user, $also);
-            respond(['record' => $rec, 'also' => (object)$also]);
+            $note = $also['_note'] ?? '';
+            unset($also['_note']);
+            respond(['record' => $rec, 'also' => (object)$also, 'note' => $note]);
+        case 'bulk_preview':
+            require_area($user, 'bookings', 'edit');
+            $a = allocate_group((string)($in['checkIn'] ?? ''), (string)($in['checkOut'] ?? ''), (array)($in['counts'] ?? []), (array)($in['blocks'] ?? []));
+            respond(['rooms' => (object)$a['rooms'], 'short' => (object)$a['short'], 'available' => (object)$a['available']]);
+        case 'bulk_book':
+            $r = bulk_book($in, $user);
+            respond(['groupRef' => $r['groupRef'], 'records' => (object)$r['records']]);
+        case 'group_status':
+            $r = group_status((string)($in['groupRef'] ?? ''), (string)($in['action'] ?? ''), $user);
+            respond(['records' => (object)$r['records'], 'also' => (object)$r['also']]);
         case 'delete':
             delete_record((string)($in['coll'] ?? ''), (string)($in['id'] ?? ''), $user);
             respond(['ok' => true]);

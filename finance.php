@@ -8,6 +8,7 @@ declare(strict_types=1);
 require __DIR__ . '/app/bootstrap.php';
 require __DIR__ . '/app/layout.php';
 require __DIR__ . '/app/mailer.php';
+require __DIR__ . '/app/ops.php';
 
 $me = require_login();
 if (!can($me, 'finance')) {
@@ -24,7 +25,11 @@ $pdo = db();
 $msg = '';
 $err = '';
 
+/** Supply purchases recorded automatically when stock deliveries are received (Operations module). */
+const SUPPLY_CATEGORIES = ['Catering: food & beverage', 'Cleaning supplies', 'Guest amenities & linen', 'Maintenance spares'];
+
 const EXPENSE_CATEGORIES = [
+    'Catering: food & beverage', 'Cleaning supplies', 'Guest amenities & linen', 'Maintenance spares',
     'Staff salaries & wages', 'Utilities: electricity', 'Utilities: water & sanitation', 'Cleaning & laundry', 'Guest amenities',
     'Security', 'Insurance', 'Internet & IT', 'Rates & taxes', 'Repairs (not on tickets)', 'Marketing & commission',
     'Bank & card fees', 'Professional fees', 'Other',
@@ -228,6 +233,12 @@ if (($_GET['export'] ?? '') === 'csv') {
     $lines[] = ['TOTAL EXPENSES', $cur['expenses'], $prev['expenses']];
     $lines[] = ['NET PROFIT / (LOSS)', $cur['net'], $prev['net']];
     $lines[] = ['Revenue lost to cancellations & no-shows', $cur['lost'], $prev['lost']];
+    $O = ops_period($F, $T);
+    $Op = ops_period($prevFrom->format('Y-m-d'), $prevTo->format('Y-m-d'));
+    $lines[] = ['Food cost per meal served', $O['food_cost_per_meal'], $Op['food_cost_per_meal']];
+    $lines[] = ['Meals served', $O['meals_served'], $Op['meals_served']];
+    $lines[] = ['Cleaning supplies per occupied room-night', $O['cleaning_per_room_night'], $Op['cleaning_per_room_night']];
+    $lines[] = ['Stock written off (wastage)', $O['wasted'], $Op['wasted']];
     foreach ($lines as $l) {
         csv_row($o, [$l[0], number_format($l[1], 2, '.', ''), number_format($l[2], 2, '.', '')], ",", "\"", "");
     }
@@ -286,8 +297,18 @@ page_open('Profit & Loss · ESS IV CRM');
           <tr class="tot"><td>Total income</td><td class="num r"><?= $R($cur['income']) ?></td><td class="num r"><?= $R($prev['income']) ?></td><td class="r"><?= $chg($cur['income'], $prev['income']) ?></td></tr>
           <tr class="sec"><td colspan="4">Expenses</td></tr>
           <tr><td>Maintenance <span class="muted">(completed tickets, actual cost)</span></td><td class="num r"><?= $R($cur['maint']) ?></td><td class="num r"><?= $R($prev['maint']) ?></td><td class="r"><?= $chg($cur['maint'], $prev['maint'], true) ?></td></tr>
-          <?php foreach (array_unique(array_merge(array_keys($cur['opex']), array_keys($prev['opex']))) as $c): ?>
-          <tr><td><?= h($c) ?></td><td class="num r"><?= $R($cur['opex'][$c] ?? 0) ?></td><td class="num r"><?= $R($prev['opex'][$c] ?? 0) ?></td><td class="r"><?= $chg($cur['opex'][$c] ?? 0, $prev['opex'][$c] ?? 0, true) ?></td></tr>
+          <?php $allCats = array_unique(array_merge(array_keys($cur['opex']), array_keys($prev['opex'])));
+                $supplyCats = array_values(array_filter(SUPPLY_CATEGORIES, fn($c) => in_array($c, $allCats, true)));
+                $otherCats = array_values(array_diff($allCats, SUPPLY_CATEGORIES)); ?>
+          <?php if ($supplyCats): ?>
+          <tr><td colspan="4" class="muted" style="font-size:12px;padding-bottom:0">Catering, kitchen &amp; cleaning supplies <span>(stock deliveries received)</span></td></tr>
+          <?php foreach ($supplyCats as $c): ?>
+          <tr><td style="padding-left:20px"><?= h($c) ?></td><td class="num r"><?= $R($cur['opex'][$c] ?? 0) ?></td><td class="num r"><?= $R($prev['opex'][$c] ?? 0) ?></td><td class="r"><?= $chg($cur['opex'][$c] ?? 0, $prev['opex'][$c] ?? 0, true) ?></td></tr>
+          <?php endforeach ?>
+          <tr><td colspan="4" class="muted" style="font-size:12px;padding-bottom:0">Other operating expenses</td></tr>
+          <?php endif ?>
+          <?php foreach ($otherCats as $c): ?>
+          <tr><td<?= $supplyCats ? ' style="padding-left:20px"' : '' ?>><?= h($c) ?></td><td class="num r"><?= $R($cur['opex'][$c] ?? 0) ?></td><td class="num r"><?= $R($prev['opex'][$c] ?? 0) ?></td><td class="r"><?= $chg($cur['opex'][$c] ?? 0, $prev['opex'][$c] ?? 0, true) ?></td></tr>
           <?php endforeach ?>
           <tr class="tot"><td>Total expenses</td><td class="num r"><?= $R($cur['expenses']) ?></td><td class="num r"><?= $R($prev['expenses']) ?></td><td class="r"><?= $chg($cur['expenses'], $prev['expenses'], true) ?></td></tr>
           <tr class="net <?= $cur['net'] >= 0 ? 'pos' : 'neg' ?>"><td>Net profit / (loss)</td><td class="num r"><?= $R($cur['net']) ?></td><td class="num r"><?= $R($prev['net']) ?></td><td class="r"><?= $chg($cur['net'], $prev['net']) ?></td></tr>
@@ -301,7 +322,7 @@ page_open('Profit & Loss · ESS IV CRM');
 
     <div class="grid">
       <section class="panel"><div class="panel-head"><h2 class="grow">Month by month</h2></div>
-        <?php $maxv = max(1, ...array_map(fn($m) => max($m['p']['income'], $m['p']['expenses']), $months)); ?>
+        <?php $maxv = max(1, ...array_values(array_map(fn($m) => max($m['p']['income'], $m['p']['expenses']), $months))); ?>
         <div class="mbars">
           <?php foreach ($months as $m): $p = $m['p']; ?>
             <div class="mrow"><span class="mono"><?= h($m['label']) ?></span>
@@ -323,6 +344,25 @@ page_open('Profit & Loss · ESS IV CRM');
       </section>
     </div>
   </div>
+
+  <?php $O = ops_period($F, $T); $Op = ops_period($prevFrom->format('Y-m-d'), $prevTo->format('Y-m-d')); $grpRows = [
+      ['Catering', 'Catering: food & beverage'], ['Cleaning', 'Cleaning supplies'], ['Amenities & linen', 'Guest amenities & linen'], ['Maintenance', 'Maintenance spares']]; ?>
+  <section class="panel"><div class="panel-head"><h2 class="grow">Catering, kitchen &amp; cleaning supplies</h2><?php if (can_any_ops($me)): ?><a class="btn sm" href="operations.php">Operations dashboard</a><?php endif ?></div>
+    <div class="kpis fin" style="margin-bottom:14px">
+      <div class="kpi" style="--k:var(--accent)"><div class="v"><?= $R($O['food_cost_per_meal']) ?></div><div class="l">Food cost per meal served <?= $chg($O['food_cost_per_meal'], $Op['food_cost_per_meal'], true) ?></div></div>
+      <div class="kpi" style="--k:var(--accent)"><div class="v"><?= number_format($O['meals_served']) ?></div><div class="l">Meals served</div></div>
+      <div class="kpi" style="--k:var(--arr)"><div class="v"><?= $R($O['cleaning_per_room_night']) ?></div><div class="l">Cleaning supplies per occupied room-night <?= $chg($O['cleaning_per_room_night'], $Op['cleaning_per_room_night'], true) ?></div></div>
+      <div class="kpi" style="--k:var(--oos)"><div class="v"><?= $R0($O['wasted']) ?></div><div class="l">Stock written off (wastage) <?= $chg($O['wasted'], $Op['wasted'], true) ?></div></div>
+      <div class="kpi" style="--k:var(--occ)"><div class="v"><?= $R0(stock_value()) ?></div><div class="l">Stock on hand today (asset, not in the P&amp;L)</div></div>
+    </div>
+    <div class="tablewrap"><table><thead><tr><th>Supplies</th><th class="r">Purchased (in P&amp;L)</th><th class="r">Used</th><th class="r">Wasted</th><th class="r">Purchased − used</th><th class="r">Previous period purchased</th></tr></thead><tbody>
+    <?php foreach ($grpRows as [$g, $cat]): $pu = $O['purchases'][$cat] ?? 0; $us = ($O['consumption'][$g]['used'] ?? 0) + ($O['consumption'][$g]['wasted'] ?? 0); ?>
+      <tr><td><?= h($g) ?></td><td class="num r"><?= $R($pu) ?></td><td class="num r"><?= $R($O['consumption'][$g]['used'] ?? 0) ?></td><td class="num r"><?= $R($O['consumption'][$g]['wasted'] ?? 0) ?></td>
+      <td class="num r" style="color:var(<?= $pu - $us >= 0 ? '--fg' : '--vac' ?>)"><?= $R($pu - $us) ?></td><td class="num r"><?= $R($Op['purchases'][$cat] ?? 0) ?></td></tr>
+    <?php endforeach ?>
+    </tbody></table></div>
+    <p class="muted" style="font-size:12px;margin-bottom:0">The P&amp;L counts supplies when they are bought (deliveries received in Stock). <b>Used</b> is what was issued to the kitchen, housekeeping and other areas, valued at average cost. A positive "Purchased − used" means stock was built up; a negative one means existing stock was drawn down.</p>
+  </section>
 
   <section class="panel"><div class="panel-head"><h2 class="grow">Cancellations &amp; no-shows</h2><span class="chip"><?= count($cancList) ?> in period</span></div>
     <div class="tablewrap"><table><thead><tr><th>Cancelled on</th><th>Ref</th><th>Guest</th><th>Company</th><th>Room</th><th>Stay</th><th>Status</th><th class="r">Booking value</th><th class="r">Fee retained</th></tr></thead><tbody>

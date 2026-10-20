@@ -71,9 +71,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $err = "The username “{$username}” is already taken.";
                     } else {
                         $perms = posted_perms();
-                        $pdo->prepare('INSERT INTO users (username, full_name, department, password_hash, role, perm_reservations, perm_rooms, perm_maintenance, perm_finance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-                            ->execute([$username, trim((string)($_POST['full_name'] ?? '')), $dept, password_hash($pw, PASSWORD_DEFAULT), $role,
-                                $perms['perm_reservations'], $perms['perm_rooms'], $perms['perm_maintenance'], $perms['perm_finance']]);
+                        $cols = array_merge(['username', 'full_name', 'department', 'password_hash', 'role'], array_keys($perms));
+                        $pdo->prepare('INSERT INTO users (' . implode(', ', $cols) . ') VALUES (' . implode(', ', array_fill(0, count($cols), '?')) . ')')
+                            ->execute([$username, trim((string)($_POST['full_name'] ?? '')), $dept, password_hash($pw, PASSWORD_DEFAULT), $role, ...array_values($perms)]);
                         $msg = "Account “{$username}” created. Give the person their username and password.";
                     }
                 }
@@ -81,8 +81,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $id = (int)($_POST['id'] ?? 0);
                 $perms = posted_perms();
                 $dept = in_array($_POST['department'] ?? '', DEPARTMENTS, true) ? $_POST['department'] : '';
-                $pdo->prepare('UPDATE users SET department = ?, perm_reservations = ?, perm_rooms = ?, perm_maintenance = ?, perm_finance = ? WHERE id = ?')
-                    ->execute([$dept, $perms['perm_reservations'], $perms['perm_rooms'], $perms['perm_maintenance'], $perms['perm_finance'], $id]);
+                $set = implode(', ', array_map(fn($c) => "`$c` = ?", array_keys($perms)));
+                $pdo->prepare("UPDATE users SET department = ?, $set WHERE id = ?")->execute([$dept, ...array_values($perms), $id]);
                 $msg = 'Access updated. It applies the next time that person loads a page.';
             } elseif ($isAdmin && in_array($do, ['reset', 'toggle', 'role'], true)) {
                 $id = (int)($_POST['id'] ?? 0);
@@ -166,7 +166,7 @@ page_open(($isAdmin ? 'Users & access' : 'My account') . ' · ESS IV CRM');
         <div class="field"><label for="nr">Role</label><select id="nr" name="role"><option value="staff">Staff: only the areas ticked below</option><option value="admin">Admin: full operational access, users and email settings</option></select></div>
       </fieldset>
       <fieldset style="margin-top:12px"><legend>Access</legend>
-        <?= perm_selects(['perm_reservations' => 'edit', 'perm_rooms' => 'none', 'perm_maintenance' => 'none', 'perm_finance' => 'none'], 'n_') ?>
+        <?= perm_selects(['perm_reservations' => 'edit'], 'n_') ?>
         <div class="spanall"><button class="btn primary">Create user</button></div>
       </fieldset>
     </form>
@@ -174,10 +174,16 @@ page_open(($isAdmin ? 'Users & access' : 'My account') . ' · ESS IV CRM');
   <script>
   document.querySelectorAll('[data-toggle]').forEach(b=>b.addEventListener('click',()=>{const r=document.getElementById(b.dataset.toggle);r.hidden=!r.hidden;b.textContent=r.hidden?'Change':'Close'}));
   document.getElementById('nd').addEventListener('change',e=>{ // sensible defaults per department
-    const pre={'Finance':{finance:'edit',reservations:'view',rooms:'none',maintenance:'view'},'Maintenance':{maintenance:'edit',rooms:'edit',reservations:'view',finance:'none'},
-      'Housekeeping':{rooms:'edit',maintenance:'view',reservations:'view',finance:'none'},'Front desk':{reservations:'edit',rooms:'view',maintenance:'view',finance:'none'},
-      'Reservations':{reservations:'edit',rooms:'view',maintenance:'none',finance:'none'},'Management':{reservations:'view',rooms:'view',maintenance:'view',finance:'view'}}[e.target.value];
-    if(pre)for(const[a,v]of Object.entries(pre))document.getElementById('n_'+a).value=v;
+    const base={reservations:'none',rooms:'none',maintenance:'none',finance:'none',catering:'none',stock:'none',cleaning:'none'};
+    const pre={'Finance':{finance:'edit',reservations:'view',maintenance:'view',stock:'view'},
+      'Maintenance':{maintenance:'edit',rooms:'edit',reservations:'view',stock:'view'},
+      'Housekeeping':{rooms:'edit',cleaning:'edit',maintenance:'view',reservations:'view',stock:'view'},
+      'Front desk':{reservations:'edit',rooms:'view',maintenance:'view',cleaning:'view'},
+      'Reservations':{reservations:'edit',rooms:'view'},
+      'Kitchen / Catering':{catering:'edit',stock:'edit',reservations:'view'},
+      'Stores':{stock:'edit',catering:'view',cleaning:'view'},
+      'Management':{reservations:'view',rooms:'view',maintenance:'view',finance:'view',catering:'view',stock:'view',cleaning:'view'}}[e.target.value];
+    if(pre)for(const[a,v]of Object.entries({...base,...pre})){const el=document.getElementById('n_'+a);if(el)el.value=v}
   });
   </script>
   <?php endif ?>

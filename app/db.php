@@ -69,6 +69,9 @@ function migrate(PDO $pdo): void
         'perm_reservations' => "ENUM('none','view','edit') NOT NULL DEFAULT 'edit'",
         'perm_rooms' => "ENUM('none','view','edit') NOT NULL DEFAULT 'none'",
         'perm_maintenance' => "ENUM('none','view','edit') NOT NULL DEFAULT 'none'",
+        'perm_catering' => "ENUM('none','view','edit') NOT NULL DEFAULT 'none'",
+        'perm_stock' => "ENUM('none','view','edit') NOT NULL DEFAULT 'none'",
+        'perm_cleaning' => "ENUM('none','view','edit') NOT NULL DEFAULT 'none'",
     ];
     foreach ($add as $col => $def) {
         if (!in_array($col, $have, true)) {
@@ -78,6 +81,16 @@ function migrate(PDO $pdo): void
     $have = $pdo->query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'bookings'")->fetchAll(PDO::FETCH_COLUMN);
     if ($have && !in_array('cancellation_fee', $have, true)) {
         $pdo->exec('ALTER TABLE bookings ADD COLUMN cancellation_fee DECIMAL(12,2) NOT NULL DEFAULT 0, ADD COLUMN cancelled_on DATE NULL');
+    }
+    if ($have && !in_array('guest_id', $have, true)) {
+        $pdo->exec("ALTER TABLE bookings ADD COLUMN guest_id VARCHAR(40) NOT NULL DEFAULT ''");
+    }
+    if ($have && !in_array('group_ref', $have, true)) {
+        $pdo->exec("ALTER TABLE bookings ADD COLUMN group_ref VARCHAR(30) NOT NULL DEFAULT '', ADD KEY idx_bookings_group (group_ref)");
+    }
+    $have = $pdo->query("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'finance_expenses'")->fetchAll(PDO::FETCH_COLUMN);
+    if ($have && !in_array('source', $have, true)) {
+        $pdo->exec("ALTER TABLE finance_expenses ADD COLUMN source VARCHAR(40) NOT NULL DEFAULT ''");
     }
 }
 

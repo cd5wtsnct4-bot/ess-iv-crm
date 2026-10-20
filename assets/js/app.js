@@ -1,15 +1,17 @@
 /* ESS IV CRM — front-end application. Talks to api.php; all records live in MySQL. */
 'use strict';
 /* ============ store: PHP + MySQL API ============ */
-const S={bookings:new Map(),rooms:new Map(),tickets:new Map(),schedules:new Map()};
+const S={bookings:new Map(),rooms:new Map(),tickets:new Map(),schedules:new Map(),guests:new Map()};
+let LAST_NOTE=''; // e.g. "Returning guest (3 previous stays): 2 saved requests added" from the last save
 const COLLS=Object.keys(S);
 const APP=window.APP||{};
 const IS_ADMIN=APP.user?.role==='admin';
 const PERMS=APP.user?.perms||{};
 /** Access per area: 'none' | 'view' | 'edit'. The server enforces the same rules. */
 const CAN=(area,level='view')=>level==='edit'?PERMS[area]==='edit':!!PERMS[area]&&PERMS[area]!=='none';
-const TAB_AREA={cal:'reservations',res:'reservations',desk:'reservations',rooms:'rooms',maint:'maintenance'};
+const TAB_AREA={cal:'reservations',res:'reservations',desk:'reservations',rooms:'rooms',maint:'maintenance',guests:'reservations'};
 let store=null, loaded=false, lastSig='';
+let OPS=[]; // operations alerts from the server: food shortages, low stock, expiry, temperatures, cleaning, deliveries
 
 async function api(r,body){
   let res;
@@ -28,12 +30,13 @@ async function refresh(){
   if(loaded&&sig===lastSig)return;
   lastSig=sig;
   for(const c of COLLS)S[c]=new Map(Object.entries(j[c]||{}));
+  OPS=Array.isArray(j.ops)?j.ops:[];
   loaded=true;scheduleRender();
 }
 function apiStore(){
   const write=async(c,id,data,mode)=>{
     try{
-      const j=await api('save',{coll:c,id,data,mode});S[c].set(id,j.record);
+      const j=await api('save',{coll:c,id,data,mode});S[c].set(id,j.record);LAST_NOTE=j.note||'';
       for(const[ac,recs]of Object.entries(j.also||{}))for(const[aid,ar]of Object.entries(recs))S[ac]?.set(aid,ar); // rooms the server changed as a knock-on
       lastSig='';scheduleRender();return j.record}
     catch(e){toast(e.message);throw e}
@@ -113,7 +116,7 @@ function computeAlerts(){
 const $=s=>document.querySelector(s);
 const view=$('#view'),dlg=$('#dlg');
 let tab='dash';
-const ui={calStart:addDays(TODAY,-2),calDays:21,calBlock:'A',calFloor:'all',calType:'',resQ:'',resStatus:'active',resRange:'all',roomBlock:'all',roomStatus:'',roomType:'',mStatus:'open',mPrio:''};
+const ui={calStart:addDays(TODAY,-2),calDays:21,calBlock:'A',calFloor:'all',calType:'',resQ:'',resGroup:'',guestQ:'',guestFilter:'',resStatus:'active',resRange:'all',roomBlock:'all',roomStatus:'',roomType:'',mStatus:'open',mPrio:''};
 try{const t=localStorage.getItem('ess4-tab');if(t)tab=t}catch(e){}
 function toast(msg){const t=$('#toast');t.textContent=msg;t.hidden=false;clearTimeout(toast.h);toast.h=setTimeout(()=>t.hidden=true,2600)}
 function statusPill(s){const m={'Provisional':'s-muted','Confirmed':'s-arr','Checked-in':'s-occ','Checked-out':'s-vac','Cancelled':'s-oos','No-show':'s-oos'};return `<span class="pill ${m[s]||''}">${esc(s)}</span>`}
@@ -122,6 +125,7 @@ const opts=(arr,sel,blank)=>(blank!=null?`<option value="">${blank}</option>`:''
 
 document.getElementById('tabs').addEventListener('click',e=>{const b=e.target.closest('button[data-tab]');if(!b)return;tab=b.dataset.tab;try{localStorage.setItem('ess4-tab',tab)}catch(e){}render()});
 $('#newBookingBtn').onclick=()=>openBooking();
+$('#bulkBtn').onclick=()=>openBulk();
 $('#todayLbl').textContent=fmt(TODAY)+' '+parse(TODAY).getFullYear();
 
 /* ============ render ============ */
@@ -132,11 +136,12 @@ function render(){
   if(TAB_AREA[tab]&&!CAN(TAB_AREA[tab]))tab='dash';
   for(const b of document.querySelectorAll('#tabs button')){b.hidden=!!TAB_AREA[b.dataset.tab]&&!CAN(TAB_AREA[b.dataset.tab]);b.setAttribute('aria-selected',b.dataset.tab===tab)}
   $('#newBookingBtn').hidden=!CAN('reservations','edit');
+  $('#bulkBtn').hidden=!CAN('reservations','edit');
   const A=computeAlerts();
-  const urgent=A.overdueOut.length+A.dueOut.length+A.arrToday.length+A.missed.length+A.maintOverdue.length;
+  const urgent=A.overdueOut.length+A.dueOut.length+A.arrToday.length+A.missed.length+A.maintOverdue.length+OPS.filter(o=>o.urgent).reduce((n,o)=>n+o.rows.length,0);
   const c=$('#alertCount');c.hidden=!urgent;c.textContent=urgent;
   const scrollX=document.querySelector('.tape')?.scrollLeft, scrollY=document.querySelector('.tape')?.scrollTop;
-  view.innerHTML=({dash:renderDash,cal:renderCal,res:renderRes,desk:renderDesk,rooms:renderRooms,maint:renderMaint})[tab](A);
+  view.innerHTML=({dash:renderDash,cal:renderCal,res:renderRes,desk:renderDesk,rooms:renderRooms,maint:renderMaint,guests:renderGuests})[tab](A);
   const tp=document.querySelector('.tape');if(tp&&scrollX!=null){tp.scrollLeft=scrollX;tp.scrollTop=scrollY}
   bindView();
 }
@@ -167,6 +172,9 @@ function renderAlerts(A,compact){
   grp('Upcoming check-outs (next 7 days)',A.upDep,b=>bookingAlert(b,'var(--occ)','Departs '+fmt(b.checkOut)+' ('+rel(b.checkOut)+')'),4);
   grp('Overdue maintenance',A.maintOverdue,t=>alertRow(PRIOS[t.priority],`${esc(t.title)} <span class="mono">· ${esc(t.roomId)}</span>`,`${esc(t.priority)} · due ${fmt(ticketDue(t))} (${rel(ticketDue(t))}) · ${esc(t.assignedTo||'Unassigned')}`,`<button class="btn sm" data-act="openTicket" data-id="${t.id}">Open</button>`));
   grp('Rooms due back in service',A.backToday,o=>alertRow('var(--mnt)',`Room <span class="mono">${esc(o.id)}</span> · ${esc(o.reason||'')}`,`Expected back ${fmt(o.expectedReturn)} (${rel(o.expectedReturn)})`,`<button class="btn sm" data-act="openRoom" data-id="${o.id}">Review</button>`));
+  for(const o of OPS){
+    g.push(`<div class="alert-group"><h3>${esc(o.title)} · ${o.rows.length}</h3>${o.rows.slice(0,compact?5:999).map(r=>alertRow(o.urgent?'var(--oos)':'var(--dirty)',esc(r[0]),esc(r.slice(1).filter(Boolean).join(' · ')),`<a class="btn sm" href="${esc(o.link)}">Open</a>`)).join('')}${compact&&o.rows.length>5?`<div style="color:var(--muted);font-size:12px">+${o.rows.length-5} more · <a href="${esc(o.link)}">see all</a></div>`:''}</div>`);
+  }
   grp('Preventive maintenance due',A.pmDue,s=>alertRow('var(--dirty)',esc(s.task),`${esc(s.scope)} · due ${fmt(s.nextDue)} (${rel(s.nextDue)})`,`<button class="btn sm" data-act="pmDone" data-id="${s.id}">Mark done</button>`));
   return g.length?g.join(''):`<div class="empty">No alerts. Arrivals, departures and maintenance deadlines will appear here.</div>`;
 }
@@ -253,18 +261,34 @@ function renderRes(){
     if(ui.resStatus!=='active'&&ui.resStatus!=='all'&&b.status!==ui.resStatus)return false;
     if(ui.resRange==='today'&&!(b.checkIn<=TODAY&&b.checkOut>=TODAY))return false;
     if(ui.resRange==='7'&&!(b.checkIn<=addDays(TODAY,7)&&b.checkOut>=TODAY))return false;
-    if(q&&!(`${b.guestName} ${b.ref} ${b.roomId} ${b.company} ${b.idNumber} ${b.phone} ${b.email}`.toLowerCase().includes(q)))return false;
+    if(ui.resGroup&&b.groupRef!==ui.resGroup)return false;
+    if(q&&!(`${b.guestName} ${b.ref} ${b.roomId} ${b.company} ${b.idNumber} ${b.phone} ${b.email} ${b.groupRef||''}`.toLowerCase().includes(q)))return false;
     return true;
-  }).sort((a,b)=>a.checkIn<b.checkIn?-1:1);
-  const total=list.length;list=list.slice(0,300);
+  }).sort((a,b)=>a.checkIn<b.checkIn?-1:a.checkIn>b.checkIn?1:(a.roomId<b.roomId?-1:1));
+  const total=list.length;
+  // Group bookings: one entry per group reference, with its client and room count.
+  const groups=new Map();
+  for(const b of S.bookings.values())if(b.groupRef){const g=groups.get(b.groupRef)||{company:b.company,checkIn:b.checkIn,n:0,active:0};g.n++;if(ACTIVE.has(b.status))g.active++;groups.set(b.groupRef,g)}
+  const grpOpts=[...groups.entries()].filter(([,g])=>g.active||ui.resGroup).sort((a,b)=>a[1].checkIn<b[1].checkIn?-1:1).map(([k,g])=>[k,`${k} · ${g.company} · ${g.n} rooms`]);
+  let groupBar='';
+  if(ui.resGroup&&groups.has(ui.resGroup)){
+    const gb=bookingsArr().filter(b=>b.groupRef===ui.resGroup),cnt=s=>gb.filter(b=>s.includes(b.status)).length;
+    const toIn=cnt(['Provisional','Confirmed']),inHouse=cnt(['Checked-in']);
+    groupBar=`<div class="banner" style="margin-bottom:10px"><p><b>${esc(ui.resGroup)}</b> · ${esc(groups.get(ui.resGroup).company)} · ${gb.length} rooms · ${toIn} to arrive · ${inHouse} in-house · value ${money(gb.filter(b=>b.status!=='Cancelled').reduce((s,b)=>s+(+b.total||0),0))}</p>
+      ${toIn?`<button class="btn primary" data-act="groupIn" data-id="${esc(ui.resGroup)}">Check in all ${toIn}</button>`:''}${inHouse?`<button class="btn" data-act="groupOut" data-id="${esc(ui.resGroup)}">Check out all ${inHouse}</button>`:''}${toIn?`<button class="btn danger" data-act="groupCancel" data-id="${esc(ui.resGroup)}">Cancel group</button>`:''}</div>`;
+  }
+  list=list.slice(0,ui.resGroup?600:300);
   return `<section class="panel"><div class="panel-head"><h2 class="grow">Reservations</h2>
     <div class="filters"><input type="search" id="resQ" placeholder="Search guest, ref, room, company, ID…" value="${esc(ui.resQ)}" style="min-width:220px">
     <select id="resStatus">${opts([['active','Active (provisional, confirmed, in-house)'],['all','All statuses'],...BOOKING_STATUSES],ui.resStatus)}</select>
     <select id="resRange">${opts([['all','Any dates'],['today','In-house / touching today'],['7','Next 7 days']],ui.resRange)}</select>
+    <select id="resGroup" aria-label="Group booking">${opts(grpOpts,ui.resGroup,'All bookings (no group filter)')}</select>
+    <button class="btn" data-act="bulk">Bulk booking</button>
     <button class="btn primary" data-act="newBooking">New reservation</button></div></div>
-    <div class="summary" style="margin-bottom:8px"><span><b>${total}</b> reservations${total>300?' (showing first 300)':''}</span></div>
+    ${groupBar}
+    <div class="summary" style="margin-bottom:8px"><span><b>${total}</b> reservations${total>list.length?` (showing first ${list.length})`:''}</span></div>
     <div class="tablewrap"><table><thead><tr><th>Ref</th><th>Guest</th><th>Company / type</th><th>Room</th><th>Check-in</th><th>Check-out</th><th>Nights</th><th>Total</th><th>Status</th><th></th></tr></thead><tbody>
-    ${list.map(b=>`<tr class="clickable" data-open="${b.id}"><td class="mono">${esc(b.ref)}</td><td><b>${esc(b.guestName)}</b><div style="color:var(--muted);font-size:12px">${esc(b.phone||'')}</div></td><td>${esc(b.company||'')}<div style="color:var(--muted);font-size:12px">${esc(b.guestType||'')}</div></td><td class="mono">${esc(b.roomId)}<div style="color:var(--muted);font-size:11px">${esc(ROOM_BY_ID[b.roomId]?.type||'')}</div></td><td class="mono">${fmt(b.checkIn)}</td><td class="mono">${fmt(b.checkOut)}</td><td class="num">${diff(b.checkIn,b.checkOut)}</td><td class="num">${money(b.total)}</td><td>${statusPill(b.status)}</td>
+    ${list.map(b=>`<tr class="clickable" data-open="${b.id}"><td class="mono">${esc(b.ref)}${b.groupRef?`<div><span class="pill s-arr" title="Group booking">${esc(b.groupRef)}</span></div>`:''}</td><td><b>${esc(b.guestName)}</b><div style="color:var(--muted);font-size:12px">${esc(b.phone||'')}</div></td><td>${esc(b.company||'')}<div style="color:var(--muted);font-size:12px">${esc(b.guestType||'')}</div></td><td class="mono">${esc(b.roomId)}<div style="color:var(--muted);font-size:11px">${esc(ROOM_BY_ID[b.roomId]?.type||'')}</div></td><td class="mono">${fmt(b.checkIn)}</td><td class="mono">${fmt(b.checkOut)}</td><td class="num">${diff(b.checkIn,b.checkOut)}</td><td class="num">${money(b.total)}</td><td>${statusPill(b.status)}</td>
     <td>${b.status==='Confirmed'||b.status==='Provisional'?`<button class="btn sm" data-act="checkin" data-id="${b.id}">Check in</button>`:b.status==='Checked-in'?`<button class="btn sm" data-act="checkout" data-id="${b.id}">Check out</button>`:''}</td></tr>`).join('')}
     </tbody></table>${list.length?'':'<div class="empty">No reservations match. Try "All statuses" or clear the search.</div>'}</div></section>`;
 }
@@ -338,12 +362,14 @@ function bindView(){
   view.querySelectorAll('[data-goto]').forEach(b=>b.onclick=()=>{tab=b.dataset.goto;render()});
   view.querySelectorAll('[data-open]').forEach(tr=>tr.onclick=e=>{if(e.target.closest('button'))return;openBooking(tr.dataset.open)});
   view.querySelectorAll('[data-ticket]').forEach(tr=>tr.onclick=()=>openTicket(tr.dataset.ticket));
+  view.querySelectorAll('[data-guest]').forEach(tr=>tr.onclick=e=>{if(e.target.closest('button'))return;openGuest(tr.dataset.guest)});
+  const gq=document.getElementById('guestQ');if(gq)gq.oninput=()=>{ui.guestQ=gq.value;clearTimeout(gq.t);gq.t=setTimeout(()=>{render();const n=document.getElementById('guestQ');n.focus();n.setSelectionRange(n.value.length,n.value.length)},250)};
   view.querySelectorAll('[data-room]:not(.track)').forEach(el=>el.onclick=()=>openRoom(el.dataset.room));
   view.querySelectorAll('[data-rs]').forEach(b=>b.onclick=()=>{ui.roomStatus=b.dataset.rs;render()});
   view.querySelectorAll('[data-cal]').forEach(b=>b.onclick=()=>{const v=b.dataset.cal;ui.calStart=v==='today'?addDays(TODAY,-2):addDays(ui.calStart,+v);render()});
   const bindSel=(id,key,num)=>{const el=document.getElementById(id);if(el)el.onchange=()=>{ui[key]=num?+el.value:el.value;render()}};
   bindSel('calDays','calDays',true);bindSel('calBlock','calBlock');bindSel('calFloor','calFloor');bindSel('calType','calType');
-  bindSel('resStatus','resStatus');bindSel('resRange','resRange');bindSel('roomBlock','roomBlock');bindSel('roomType','roomType');bindSel('mStatus','mStatus');bindSel('mPrio','mPrio');
+  bindSel('resStatus','resStatus');bindSel('resGroup','resGroup');bindSel('guestFilter','guestFilter');bindSel('resRange','resRange');bindSel('roomBlock','roomBlock');bindSel('roomType','roomType');bindSel('mStatus','mStatus');bindSel('mPrio','mPrio');
   const cs=document.getElementById('calStart');if(cs)cs.onchange=()=>{if(cs.value){ui.calStart=cs.value;render()}};
   const rq=document.getElementById('resQ');if(rq)rq.oninput=()=>{ui.resQ=rq.value;clearTimeout(rq.t);rq.t=setTimeout(()=>{render();const n=document.getElementById('resQ');n.focus();n.setSelectionRange(n.value.length,n.value.length)},250)};
   view.querySelectorAll('.track[data-room]').forEach(tr=>tr.onclick=e=>{
@@ -353,14 +379,28 @@ function bindView(){
     openBooking(null,{roomId:tr.dataset.room,checkIn:d,checkOut:addDays(d,1)});
   });
   const hideIf=(sel,cond)=>{if(cond)view.querySelectorAll(sel).forEach(el=>el.remove())};
-  hideIf('[data-act=checkin],[data-act=checkout],[data-act=newBooking]',!CAN('reservations','edit'));
+  hideIf('[data-act=checkin],[data-act=checkout],[data-act=newBooking],[data-act=bulk],[data-act=newGuest],[data-act=bookAgain],[data-act=groupIn],[data-act=groupOut],[data-act=groupCancel]',!CAN('reservations','edit'));
   hideIf('[data-act=newTicket],[data-act=newSchedule],[data-act=pmDone]',!CAN('maintenance','edit'));
   hideIf('[data-act=openTicket]',!CAN('maintenance'));
   hideIf('[data-act=openRoom],[data-act=findRoom]',!CAN('rooms'));
   hideIf('[data-goto=desk]',!CAN('reservations'));
   view.querySelectorAll('[data-act]').forEach(b=>b.onclick=e=>{e.stopPropagation();Promise.resolve(ACTS[b.dataset.act]?.(b.dataset.id)).catch(()=>{})});
 }
+async function groupAction(ref,action,label){
+  try{
+    const j=await api('group_status',{groupRef:ref,action});
+    for(const[id,r]of Object.entries(j.records||{}))S.bookings.set(id,r);
+    for(const[id,r]of Object.entries(j.also?.rooms||{}))S.rooms.set(id,r);
+    lastSig='';scheduleRender();toast(`${Object.keys(j.records||{}).length} rooms ${label}`);
+  }catch(e){toast(e.message)}
+}
 const ACTS={
+  newGuest:()=>openGuest(null),
+  bookAgain:id=>bookAgain(id),
+  bulk:()=>openBulk(),
+  groupIn:ref=>groupAction(ref,'checkin','checked in'),
+  groupOut:ref=>groupAction(ref,'checkout','checked out; rooms marked dirty'),
+  groupCancel:ref=>confirmBox('Cancel group '+ref+'?','Every room in this group that has not checked in is cancelled and released. Deposits are kept as cancellation fees.','Cancel group',()=>groupAction(ref,'cancel','cancelled')),
   newBooking:()=>openBooking(),openBooking:id=>openBooking(id),openTicket:id=>openTicket(id),openRoom:id=>openRoom(id),
   checkin:id=>doCheckIn(id),checkout:id=>doCheckOut(id),newTicket:()=>openTicket(),findRoom:()=>openFinder(),
   newSchedule:()=>openSchedule(),editSchedule:id=>openSchedule(id),
@@ -427,12 +467,13 @@ function openBooking(id,preset={}){
       ${f('status','Booking status',`<select id="status">${opts(BOOKING_STATUSES,b.status)}</select>`)}
       ${inp('keyCard','Key card number')}
       ${f('specialRequests','Special requests',`<textarea id="specialRequests">${esc(b.specialRequests||'')}</textarea>`,'span2')}
+      <div class="field spanall" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="saveRequests" style="width:auto" ${ex?'':'checked'}><label for="saveRequests" style="font-size:13px;color:var(--fg)">Remember these special requests on the guest's profile for future stays</label></div>
       ${f('notes','Internal notes',`<textarea id="notes">${esc(b.notes||'')}</textarea>`,'spanall')}
-      ${ex?`<div class="spanall summary"><span>Created <b>${fmt(ex.createdAt)}</b></span><span>Checked in <b>${fmt(ex.checkedInAt)}</b></span><span>Checked out <b>${fmt(ex.checkedOutAt)}</b></span></div>`:''}
+      ${ex?`<div class="spanall summary">${ex.groupRef?`<span>Group <b>${esc(ex.groupRef)}</b></span>`:''}<span>Created <b>${fmt(ex.createdAt)}</b></span><span>Checked in <b>${fmt(ex.checkedInAt)}</b></span><span>Checked out <b>${fmt(ex.checkedOutAt)}</b></span></div>`:''}
     </fieldset>
     <div class="err" id="bkErr" role="alert"></div>
   </div>
-  <div class="dlg-foot"><div class="left">${ex&&(ex.status==='Confirmed'||ex.status==='Provisional')?`<button type="button" class="btn" id="bkIn" data-edit>Check in now</button><button type="button" class="btn danger" id="bkCancel" data-edit>Cancel reservation</button>`:''}${ex&&ex.status==='Checked-in'?`<button type="button" class="btn" id="bkOut" data-edit>Check out now</button>`:''}</div>
+  <div class="dlg-foot"><div class="left">${(ex?.guestId||b.guestId)&&S.guests.has(ex?.guestId||b.guestId)?`<button type="button" class="btn" id="bkGuest">Guest profile</button>`:''}${ex&&(ex.status==='Confirmed'||ex.status==='Provisional')?`<button type="button" class="btn" id="bkIn" data-edit>Check in now</button><button type="button" class="btn danger" id="bkCancel" data-edit>Cancel reservation</button>`:''}${ex&&ex.status==='Checked-in'?`<button type="button" class="btn" id="bkOut" data-edit>Check out now</button>`:''}</div>
   <button type="button" class="btn" data-close>Discard</button><button type="submit" class="btn primary">${ex?'Save changes':'Create reservation'}</button></div></form>`,()=>{
     const refreshRooms=()=>{
       const ci=val('checkIn'),co=val('checkOut'),type=val('roomType');
@@ -448,6 +489,26 @@ function openBooking(id,preset={}){
       dlg.querySelector('#stayInfo').innerHTML=`<span>Nights <b>${Math.max(0,nights)}</b></span><span>Available rooms for these dates <b>${list.length}</b>${type?' ('+type+')':''}</span>`;
     };
     dlg.querySelector('#rate').oninput=e=>{e.target.dataset.touched=1;refreshRooms()};
+    // Returning guests: recognise them from ID, email or phone and offer their saved requests.
+    dlg.dataset.guestId=ex?.guestId||b.guestId||'';
+    const gpBox=document.createElement('div');gpBox.id='gpBanner';dlg.querySelector('.dlg-body').prepend(gpBox);
+    const showGuest=()=>{
+      const g=dlg.dataset.guestId?S.guests.get(dlg.dataset.guestId):matchGuest({idNumber:val('idNumber'),email:val('email'),phone:val('phone'),guestName:val('guestName')});
+      if(!g){gpBox.innerHTML='';return}
+      const gid=[...S.guests.entries()].find(([,v])=>v===g)?.[0]||dlg.dataset.guestId;
+      const reqs=savedRequests(g),cur=val('specialRequests').toLowerCase(),missing=reqs.filter(r=>!cur.includes(r.toLowerCase()));
+      gpBox.innerHTML=`<div class="banner"><p><b>Returning guest: ${esc(g.guestName)}</b>${g.vip?' <span class="pill s-arr">VIP</span>':''} · ${g.stays||0} previous stay${g.stays===1?'':'s'}${g.lastStay?' · last '+fmt(g.lastStay):''}${reqs.length?`<br><span class="muted">Saved requests:</span> ${esc(reqs.join(' · '))}`:''}${g.notes?`<br><span class="muted">Notes:</span> ${esc(g.notes)}`:''}</p>
+        ${!ex&&(missing.length||dlg.dataset.guestId!==gid)?`<button type="button" class="btn primary" id="gpUse">${missing.length?'Add saved requests':'Link to profile'}</button>`:''}</div>`;
+      gpBox.querySelector('#gpUse')?.addEventListener('click',()=>{
+        dlg.dataset.guestId=gid;
+        for(const[k,v]of[['guestName',g.guestName],['idNumber',g.idNumber],['email',g.email],['phone',g.phone],['company',g.company],['nationality',g.nationality],['vehicleReg',g.vehicleReg]]){const el=dlg.querySelector('#'+k);if(el&&!el.value&&v)el.value=v}
+        const ta=dlg.querySelector('#specialRequests');ta.value=[ta.value.trim(),...missing].filter(Boolean).join('\n');
+        showGuest();
+      });
+    };
+    ['idNumber','email','phone','guestName'].forEach(k=>dlg.querySelector('#'+k)?.addEventListener('change',()=>{if(!ex)dlg.dataset.guestId='';showGuest()}));
+    showGuest();
+    dlg.querySelector('#bkGuest')?.addEventListener('click',()=>openGuest(ex?.guestId||b.guestId));
     ['checkIn','checkOut','roomType'].forEach(i=>dlg.querySelector('#'+i).onchange=refreshRooms);
     dlg.querySelector('#roomId').onchange=refreshRooms;
     if(ex)dlg.querySelector('#rate').dataset.touched=1;
@@ -461,6 +522,7 @@ function openBooking(id,preset={}){
       e.preventDefault();
       const err=dlg.querySelector('#bkErr');
       const d={};['guestName','idNumber','nationality','phone','email','company','guestType','vehicleReg','emergencyName','emergencyPhone','checkIn','checkOut','arrivalTime','departureTime','roomId','payment','billingRef','source','status','keyCard','specialRequests','notes'].forEach(k=>d[k]=val(k).trim());
+      d.guestId=dlg.dataset.guestId||'';d.saveRequests=dlg.querySelector('#saveRequests').checked;
       d.adults=+val('adults')||1;d.children=+val('children')||0;d.rate=+val('rate')||0;d.deposit=+val('deposit')||0;d.cancellationFee=+val('cancellationFee')||0;
       if(!d.guestName)return err.textContent='Enter the guest’s full name.';
       if(!d.checkIn||!d.checkOut||d.checkOut<=d.checkIn)return err.textContent='Check-out must be at least one day after check-in.';
@@ -474,8 +536,8 @@ function openBooking(id,preset={}){
       if(d.status==='Checked-in'&&!ex?.checkedInAt)d.checkedInAt=TODAY;
       if(d.status==='Checked-out'&&!ex?.checkedOutAt)d.checkedOutAt=TODAY;
       try{
-        if(ex){await store.update('bookings',ex.id,d);toast('Reservation saved')}
-        else{d.ref='';d.createdAt=TODAY;d.checkedInAt=d.checkedInAt||'';d.checkedOutAt=d.checkedOutAt||'';const rec=await store.set('bookings',uid('b_'),d);toast('Reservation '+rec.ref+' created')}
+        if(ex){await store.update('bookings',ex.id,d);toast('Reservation saved'+(LAST_NOTE?'. '+LAST_NOTE:''))}
+        else{d.ref='';d.createdAt=TODAY;d.checkedInAt=d.checkedInAt||'';d.checkedOutAt=d.checkedOutAt||'';const rec=await store.set('bookings',uid('b_'),d);toast('Reservation '+rec.ref+' created'+(LAST_NOTE?'. '+LAST_NOTE:''))}
       }catch(e){err.textContent=e.message;return}
       dlg.close();
     };
@@ -608,6 +670,159 @@ function openSchedule(id){
       if(!d.task)return dlg.querySelector('#scErr').textContent='Name the task.';
       try{await (id?store.update('schedules',id,d):store.set('schedules',uid('s_'),d))}catch(e){dlg.querySelector('#scErr').textContent=e.message;return}
       dlg.close();toast('Task saved')};
+  });
+}
+
+/* ---- Guests: profiles & saved special requests ---- */
+const normId=s=>(s||'').replace(/\s+/g,'');
+const digits=s=>{let d=(s||'').replace(/\D+/g,'');if(d.length===10&&d[0]==='0')d='27'+d.slice(1);return d}; // SA 0XX… = 27XX…
+function matchGuest({idNumber,email,phone,guestName}){
+  const idn=normId(idNumber),em=(email||'').trim().toLowerCase(),ph=digits(phone),sur=(guestName||'').trim().split(/\s+/).pop()?.toLowerCase()||'';
+  for(const g of S.guests.values()){
+    if(idn.length>=5&&normId(g.idNumber)===idn)return g;
+  }
+  if(em.includes('@'))for(const g of S.guests.values())if((g.email||'').toLowerCase()===em)return g;
+  if(ph.length>=9&&sur)for(const g of S.guests.values())if(digits(g.phone)===ph&&g.guestName.toLowerCase().endsWith(sur))return g;
+  return null;
+}
+function savedRequests(g){
+  const lines=(g.standingRequests||'').split(/\n|;/).map(s=>s.trim()).filter(Boolean);
+  if(g.dietary)lines.push('Dietary: '+g.dietary);
+  if(g.roomPreference)lines.push('Room preference: '+g.roomPreference);
+  return lines;
+}
+function renderGuests(){
+  const q=ui.guestQ.toLowerCase();
+  let list=[...S.guests.entries()].map(([id,g])=>({id,...g})).filter(g=>{
+    if(ui.guestFilter==='requests'&&!savedRequests(g).length)return false;
+    if(ui.guestFilter==='vip'&&!g.vip)return false;
+    if(ui.guestFilter==='inhouse'&&![...S.bookings.values()].some(b=>b.guestId===g.id&&b.status==='Checked-in'))return false;
+    return !q||`${g.guestName} ${g.idNumber} ${g.company} ${g.phone} ${g.email}`.toLowerCase().includes(q);
+  }).sort((a,b)=>(b.lastStay||'').localeCompare(a.lastStay||'')||a.guestName.localeCompare(b.guestName));
+  const total=list.length;list=list.slice(0,300);
+  const next=id=>[...S.bookings.values()].filter(b=>b.guestId===id&&ACTIVE.has(b.status)).sort((a,b)=>a.checkIn<b.checkIn?-1:1)[0];
+  return `<section class="panel"><div class="panel-head"><h2 class="grow">Guests</h2>
+    <div class="filters"><input type="search" id="guestQ" placeholder="Search name, ID, company, phone…" value="${esc(ui.guestQ)}" style="min-width:220px">
+    <select id="guestFilter">${opts([['','All guests'],['requests','With saved requests'],['vip','VIP'],['inhouse','In-house now']],ui.guestFilter)}</select>
+    <button class="btn primary" data-act="newGuest">New guest profile</button></div></div>
+    <p class="muted" style="margin-top:0">Saved requests are added automatically to every new booking for that guest. Guests are recognised by ID/passport number, email, or phone and surname.</p>
+    <div class="summary" style="margin-bottom:8px"><span><b>${total}</b> guest profiles${total>300?' (showing 300)':''}</span></div>
+    <div class="tablewrap"><table><thead><tr><th>Guest</th><th>ID / passport</th><th>Company</th><th>Stays</th><th>Last stay</th><th>Next stay</th><th>Saved requests</th><th></th></tr></thead><tbody>
+    ${list.map(g=>{const n=next(g.id),r=savedRequests(g);return `<tr class="clickable" data-guest="${g.id}"><td><b>${esc(g.guestName)}</b>${g.vip?' <span class="pill s-arr">VIP</span>':''}<div style="color:var(--muted);font-size:12px">${esc(g.phone||g.email||'')}</div></td><td class="mono">${esc(g.idNumber)}</td><td>${esc(g.company)}</td><td class="num">${g.stays||0}</td><td class="mono">${fmt(g.lastStay)}</td><td class="mono">${n?fmt(n.checkIn)+' · '+esc(n.roomId):'—'}</td><td style="font-size:12px;max-width:320px">${r.length?esc(r.join(' · ')):'<span class="muted">—</span>'}</td><td><button class="btn sm" data-act="bookAgain" data-id="${g.id}">Book again</button></td></tr>`}).join('')}
+    </tbody></table>${list.length?'':'<div class="empty">No guest profiles match. Profiles are created automatically when a booking has an ID number, email or phone.</div>'}</div></section>`;
+}
+function openGuest(id){
+  DLG_LOCK='reservations';
+  const g=id?{...S.guests.get(id)}:{};
+  const stays=id?[...S.bookings.values()].filter(b=>b.guestId===id).sort((a,b)=>a.checkIn<b.checkIn?1:-1):[];
+  const inp=(k,l,t='text',cls='')=>`<div class="field ${cls}"><label for="g_${k}">${l}</label><input id="g_${k}" type="${t}" value="${esc(g[k]??'')}"></div>`;
+  showDlg(`<form id="gForm"><div class="dlg-head"><h2>${id?esc(g.guestName):'New guest profile'}</h2>${g.vip?'<span class="pill s-arr">VIP</span>':''}<button type="button" class="btn sm" data-close>Close</button></div>
+  <div class="dlg-body">
+    <fieldset><legend>Guest</legend>${inp('guestName','Full name *','text','span2')}${inp('idNumber','ID / passport number')}${inp('phone','Mobile','tel')}${inp('email','Email','email')}${inp('company','Company')}${inp('nationality','Nationality')}${inp('vehicleReg','Vehicle registration')}
+      <div class="field" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="g_vip" style="width:auto" ${g.vip?'checked':''}><label for="g_vip" style="font-size:13px;color:var(--fg)">VIP guest</label></div></fieldset>
+    <fieldset><legend>Saved special requests (added to every new booking)</legend>
+      <div class="field spanall"><label for="g_standingRequests">Standing requests, one per line</label><textarea id="g_standingRequests" rows="4" placeholder="Ground floor room&#10;Extra pillows&#10;Late check-out on Fridays">${esc(g.standingRequests||'')}</textarea></div>
+      ${inp('dietary','Dietary requirements','text','span2')}${inp('roomPreference','Room preference','text','span2')}
+      <div class="field spanall"><label for="g_notes">Internal notes (staff only)</label><textarea id="g_notes" rows="2">${esc(g.notes||'')}</textarea></div>
+    </fieldset>
+    ${id?`<div><h3 style="margin-bottom:8px">Stay history · ${stays.length}</h3>${stays.length?stays.slice(0,30).map(b=>`<div class="summary" style="margin-bottom:4px">${statusPill(b.status)}<span class="mono">${fmt(b.checkIn)} → ${fmt(b.checkOut)}</span><span>Room <b>${esc(b.roomId)}</b></span><span class="mono">${esc(b.ref)}</span>${b.specialRequests?`<span style="font-size:12px">${esc(b.specialRequests.split('\n').join(' · '))}</span>`:''}</div>`).join(''):'<div class="empty">No stays on record in the last 60 days.</div>'}</div>`:''}
+    <div class="err" id="gErr" role="alert"></div>
+  </div>
+  <div class="dlg-foot"><div class="left">${id?`<button type="button" class="btn" id="gBook">Book again</button>`:''}</div><button type="button" class="btn" data-close>Discard</button><button class="btn primary" type="submit">Save profile</button></div></form>`,()=>{
+    dlg.querySelector('#gBook')?.addEventListener('click',()=>bookAgain(id));
+    dlg.querySelector('#gForm').onsubmit=async e=>{
+      e.preventDefault();
+      const d={};for(const k of ['guestName','idNumber','phone','email','company','nationality','vehicleReg','standingRequests','dietary','roomPreference','notes'])d[k]=val('g_'+k).trim();
+      d.vip=dlg.querySelector('#g_vip').checked;
+      if(!d.guestName){dlg.querySelector('#gErr').textContent='Enter the guest’s name.';return}
+      try{await (id?store.update('guests',id,d):store.set('guests',uid('g_'),d))}catch(e2){dlg.querySelector('#gErr').textContent=e2.message;return}
+      dlg.close();toast('Guest profile saved');
+    };
+  });
+}
+/** New booking prefilled from the guest's profile, with their saved requests already added. */
+function bookAgain(id){
+  const g=S.guests.get(id);if(!g)return;
+  const last=[...S.bookings.values()].filter(b=>b.guestId===id).sort((a,b)=>a.checkIn<b.checkIn?1:-1)[0];
+  openBooking(null,{guestId:id,guestName:g.guestName,idNumber:g.idNumber,phone:g.phone,email:g.email,company:g.company,nationality:g.nationality,vehicleReg:g.vehicleReg,
+    roomType:last?.roomType||'',guestType:last?.guestType||'Contractor',specialRequests:savedRequests(g).join('\n'),checkIn:addDays(TODAY,1),checkOut:addDays(TODAY,2)});
+}
+
+/* ---- Bulk (group) booking ---- */
+function openBulk(){
+  DLG_LOCK='reservations';
+  const types=Object.keys(TYPES);
+  showDlg(`<form id="blkForm" novalidate><div class="dlg-head"><h2>Bulk booking for a client</h2><button type="button" class="btn sm" data-close>Close</button></div>
+  <div class="dlg-body">
+    <fieldset><legend>Client</legend>
+      <div class="field span2"><label for="bk_company">Client / company *</label><input id="bk_company" required placeholder="e.g. Murray &amp; Roberts"></div>
+      <div class="field"><label for="bk_contact">Contact person</label><input id="bk_contact"></div>
+      <div class="field"><label for="bk_phone">Contact number</label><input id="bk_phone" type="tel"></div>
+      <div class="field"><label for="bk_email">Contact email</label><input id="bk_email" type="email"></div>
+      <div class="field"><label for="bk_type">Guest type</label><select id="bk_type">${opts(['Group','Corporate','Contractor','Student','Staff'],'Group')}</select></div>
+      <div class="field"><label for="bk_billing">PO / billing reference</label><input id="bk_billing"></div>
+      <div class="field"><label for="bk_payment">Payment</label><select id="bk_payment">${opts(PAY,'Company account')}</select></div>
+    </fieldset>
+    <fieldset><legend>Stay &amp; rooms</legend>
+      <div class="field"><label for="bk_in">Check-in *</label><input id="bk_in" type="date" value="${addDays(TODAY,1)}"></div>
+      <div class="field"><label for="bk_out">Check-out *</label><input id="bk_out" type="date" value="${addDays(TODAY,8)}"></div>
+      <div class="field"><label for="bk_arr">Expected arrival</label><input id="bk_arr" type="time" value="14:00"></div>
+      <div class="field"><label for="bk_status">Status</label><select id="bk_status">${opts(['Confirmed','Provisional'],'Confirmed')}</select></div>
+      ${types.map(t=>`<div class="field"><label for="bk_n_${t}">${t} rooms <span class="muted" id="bk_av_${t}"></span></label><input id="bk_n_${t}" type="number" min="0" value="0" data-type="${t}"></div>`).join('')}
+      <div class="field spanall"><label>Preferred blocks (blank = any)</label><div class="filters">${BLOCKS.map(b=>`<label class="check"><input type="checkbox" class="bk_blk" value="${b}"> Block ${b}</label>`).join('')}</div></div>
+      <div class="spanall summary" id="bk_info"></div>
+    </fieldset>
+    <fieldset><legend>Rates per night (R)</legend>
+      ${types.map(t=>`<div class="field"><label for="bk_r_${t}">${t}</label><input id="bk_r_${t}" type="number" min="0" step="10" value="${TYPES[t]}"></div>`).join('')}
+    </fieldset>
+    <fieldset><legend>Guests &amp; notes</legend>
+      <div class="field span2"><label for="bk_names">Guest names, one per line (optional; filled into rooms in order)</label><textarea id="bk_names" rows="5" placeholder="Thabo Mokoena&#10;Lerato Dlamini&#10;…"></textarea></div>
+      <div class="field span2"><label for="bk_req">Special requests (applied to every room)</label><textarea id="bk_req" rows="5"></textarea></div>
+      <div class="field spanall"><label for="bk_notes">Internal notes</label><input id="bk_notes"></div>
+    </fieldset>
+    <div id="bk_alloc"></div>
+    <div class="err" id="bk_err" role="alert"></div>
+  </div>
+  <div class="dlg-foot"><button type="button" class="btn" data-close>Discard</button><button type="button" class="btn" id="bk_find">Find rooms</button><button type="submit" class="btn primary" id="bk_go" disabled>Book rooms</button></div></form>`,()=>{
+    let alloc=null;
+    const counts=()=>Object.fromEntries(types.map(t=>[t,+val('bk_n_'+t)||0]));
+    const blocks=()=>[...dlg.querySelectorAll('.bk_blk:checked')].map(x=>x.value);
+    const info=()=>{
+      const ci=val('bk_in'),co=val('bk_out');alloc=null;dlg.querySelector('#bk_go').disabled=true;dlg.querySelector('#bk_alloc').innerHTML='';
+      if(!ci||!co||co<=ci){dlg.querySelector('#bk_info').innerHTML='<span class="err">Check-out must be after check-in.</span>';return}
+      const free=availableRooms(ci,co,''),n=diff(ci,co),c=counts(),totalRooms=Object.values(c).reduce((a,b)=>a+b,0);
+      for(const t of types)dlg.querySelector('#bk_av_'+t).textContent='('+free.filter(r=>r.type===t).length+' free)';
+      const value=types.reduce((s,t)=>s+c[t]*(+val('bk_r_'+t)||0)*n,0);
+      dlg.querySelector('#bk_info').innerHTML=`<span>Nights <b>${n}</b></span><span>Rooms requested <b>${totalRooms}</b></span><span>Free rooms for these dates <b>${free.length}</b></span><span>Estimated value <b>${money(value)}</b></span>`;
+    };
+    dlg.querySelectorAll('input,select,textarea').forEach(el=>el.addEventListener('input',info));
+    info();
+    dlg.querySelector('#bk_find').onclick=async()=>{
+      const err=dlg.querySelector('#bk_err');err.textContent='';
+      const c=counts();if(!Object.values(c).some(n=>n>0)){err.textContent='Enter how many rooms of each type the client needs.';return}
+      try{
+        const j=await api('bulk_preview',{checkIn:val('bk_in'),checkOut:val('bk_out'),counts:c,blocks:blocks()});
+        const ids=Object.keys(j.rooms||{}),short=Object.entries(j.short||{});
+        const byBlock={};for(const id of ids){const r=ROOM_BY_ID[id];(byBlock['Block '+r.block+', floor '+r.floor]??=[]).push(id)}
+        dlg.querySelector('#bk_alloc').innerHTML=`<div class="banner"><p><b>${ids.length} rooms found</b>${short.length?` · <span class="err">not enough free: ${short.map(([t,n])=>n+' '+t).join(', ')}</span>`:''}. Rooms are kept together by block and floor where possible.</p></div>
+          <div class="summary" style="margin-top:8px;flex-direction:column;gap:4px">${Object.entries(byBlock).map(([k,v])=>`<span>${k}: <b>${v.join(', ')}</b></span>`).join('')}</div>`;
+        alloc=ids;const go=dlg.querySelector('#bk_go');go.disabled=!ids.length;go.textContent=`Book ${ids.length} rooms`;
+      }catch(e){err.textContent=e.message}
+    };
+    dlg.querySelector('#blkForm').onsubmit=async e=>{
+      e.preventDefault();const err=dlg.querySelector('#bk_err');
+      if(!val('bk_company').trim()){err.textContent='Enter the client or company name.';return}
+      if(!alloc||!alloc.length){err.textContent='Click “Find rooms” first.';return}
+      const go=dlg.querySelector('#bk_go');go.disabled=true;go.textContent='Booking…';
+      try{
+        const j=await api('bulk_book',{company:val('bk_company'),contact:val('bk_contact'),phone:val('bk_phone'),email:val('bk_email'),guestType:val('bk_type'),billingRef:val('bk_billing'),payment:val('bk_payment'),
+          checkIn:val('bk_in'),checkOut:val('bk_out'),arrivalTime:val('bk_arr'),status:val('bk_status'),roomIds:alloc,
+          rates:Object.fromEntries(types.map(t=>[t,+val('bk_r_'+t)||0])),guestNames:val('bk_names').split('\n'),specialRequests:val('bk_req'),notes:val('bk_notes')});
+        for(const[id,r]of Object.entries(j.records||{}))S.bookings.set(id,r);
+        lastSig='';dlg.close();ui.resGroup=j.groupRef;ui.resStatus='all';tab='res';scheduleRender();
+        toast(`Group ${j.groupRef}: ${Object.keys(j.records).length} rooms booked`);
+      }catch(e2){err.textContent=e2.message+' Nothing was booked; click “Find rooms” again.';go.disabled=false;go.textContent='Book rooms';alloc=null}
+    };
   });
 }
 

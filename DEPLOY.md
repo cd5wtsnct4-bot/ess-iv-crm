@@ -266,6 +266,9 @@ Every user has an access level of **No access**, **View only** or **Can edit** f
 | Room status | The 600-room status board, taking rooms out of service, housekeeping status | **No access** until approved |
 | Room maintenance | Maintenance tickets and the preventive maintenance schedule | **No access** until approved |
 | Finance (Profit & Loss) | The Finance page: P&L, cancellations, operating expenses, VAT | **No access**. This is never automatic, not even for admins. |
+| Kitchen & catering | Meal planner, meals served, food-safety temperature log | **No access** until approved |
+| Stock & purchasing | Stock items, movements, purchase orders, usage reports | **No access** until approved |
+| Cleaning & housekeeping | Housekeeping board, cleaning schedule, cleaning supplies | **No access** until approved |
 
 - When you add a user, choosing a **Department** fills in suggested access, which you can change before saving. For example, Finance gets Finance *Can edit*, and Maintenance gets Room status and Room maintenance *Can edit*.
 - To change someone's access later, click **Change** next to their name.
@@ -300,6 +303,38 @@ Every alert also appears in the system: on the **Dashboard** alerts panel, as th
 
 ---
 
+### Operations: catering, kitchen, stock and cleaning
+
+Click **Operations** at the top right. It's visible to anyone with access to Kitchen & catering, Stock & purchasing, or Cleaning & housekeeping.
+
+- **Stock alerts** are shown on the dashboards and emailed to the alert recipients:
+  - *below reorder level* (a shortage)
+  - *getting close*: within 25% above the reorder level, or due to run out within 5 days at the last 14 days' usage
+  - Food items are listed first, as **Food shortages**.
+  - You can change the 25% and the 5 days under **Stock & purchasing → Stock alert settings**.
+- **Receiving a purchase order** adds the stock and records the cost as an expense in the P&L. Food goes under *Catering: food & beverage* and cleaning products under *Cleaning supplies*.
+- **Temperature checks** outside the safe range (fridges 0 to 5 °C, freezers −18 °C or colder, hot holding 63 °C or hotter) need an action recorded, and send an immediate alert email.
+
+### Bulk bookings and returning guests
+
+- **Bulk booking** (top right) books many rooms for one client:
+  1. Enter the client, the dates and how many rooms of each type, plus any preferred blocks and guest names.
+  2. Click **Find rooms** to see the allocation.
+  3. Click **Book**.
+- All of the group's rooms share a group reference, such as `GRP-261020-AB12C`. Choose the group in **Reservations** to check in, check out or cancel the whole group at once.
+- **Guests:** a guest profile is created automatically from the first booking that has an ID number, email or phone. When the guest books again, their saved special requests, dietary needs and room preference are added to the new booking. Manage profiles in the **Guests** tab.
+
+### Updating an existing installation
+
+Upload the new files over the old ones, **keeping `config.php`**. Then add the new tables and columns in one of these ways:
+
+- **Easiest:** delete `install.lock`, open `install.php`, and enter the same database details and admin username. The installer only adds what's missing and keeps all your data. Delete `install.php` again afterwards.
+- **Command line:**
+
+  ```
+  php -r 'require "app/bootstrap.php"; run_schema(db());'
+  ```
+
 ## Backups
 
 All records are in the MySQL database. Back it up daily:
@@ -310,10 +345,6 @@ All records are in the MySQL database. Back it up daily:
   ```
   30 2 * * * mysqldump --single-transaction ess4crm | gzip > /var/backups/ess4crm-$(date +\%F).sql.gz
   ```
-
-## Updating to a new version
-
-Upload and overwrite every file **except `config.php`**. Don't upload `install.php` again unless the new version needs it. If it does, run it once and delete it again; it only creates tables that are missing.
 
 ## Troubleshooting
 

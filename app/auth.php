@@ -38,9 +38,13 @@ function current_user(): ?array
     if (empty($_SESSION['uid'])) {
         return $user = null;
     }
-    $st = db()->prepare('SELECT id, username, full_name, role, department, perm_reservations, perm_rooms, perm_maintenance, perm_finance FROM users WHERE id = ? AND active = 1');
+    $st = db()->prepare('SELECT * FROM users WHERE id = ? AND active = 1');
     $st->execute([$_SESSION['uid']]);
-    return $user = ($st->fetch() ?: null);
+    $user = $st->fetch() ?: null;
+    if ($user) {
+        unset($user['password_hash']);
+    }
+    return $user;
 }
 
 function require_login(): array
@@ -58,8 +62,11 @@ const AREAS = [
     'rooms'        => 'Room status',
     'maintenance'  => 'Room maintenance',
     'finance'      => 'Finance (Profit & Loss)',
+    'catering'     => 'Kitchen & catering',
+    'stock'        => 'Stock & purchasing',
+    'cleaning'     => 'Cleaning & housekeeping',
 ];
-const DEPARTMENTS = ['Front desk', 'Reservations', 'Housekeeping', 'Maintenance', 'Finance', 'Management', 'Security', 'Other'];
+const DEPARTMENTS = ['Front desk', 'Reservations', 'Housekeeping', 'Maintenance', 'Kitchen / Catering', 'Stores', 'Finance', 'Management', 'Security', 'Other'];
 const ACCESS_LEVELS = ['none' => 'No access', 'view' => 'View only', 'edit' => 'Can edit'];
 
 /** ['reservations' => 'edit', 'rooms' => 'view', 'maintenance' => 'none'] — admins get edit everywhere. */

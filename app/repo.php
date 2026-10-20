@@ -20,10 +20,19 @@ const COLLECTIONS = [
             'rate' => ['rate', 'd'], 'total' => ['total', 'd'], 'deposit' => ['deposit', 'd'],
             'payment' => ['payment', 's', 30], 'billingRef' => ['billing_ref', 's', 60], 'source' => ['source', 's', 30],
             'status' => ['status', 's', 20], 'keyCard' => ['key_card', 's', 30],
-            'cancellationFee' => ['cancellation_fee', 'd'], 'cancelledAt' => ['cancelled_on', 'date'],
+            'cancellationFee' => ['cancellation_fee', 'd'], 'cancelledAt' => ['cancelled_on', 'date'], 'groupRef' => ['group_ref', 's', 30], 'guestId' => ['guest_id', 's', 40],
             'specialRequests' => ['special_requests', 't'], 'notes' => ['notes', 't'],
             'createdAt' => ['created_on', 'date'], 'checkedInAt' => ['checked_in_on', 'date'], 'checkedOutAt' => ['checked_out_on', 'date'],
             'example' => ['example', 'b'],
+        ],
+    ],
+    'guests' => [
+        'table' => 'guest_profiles',
+        'fields' => [
+            'guestName' => ['guest_name', 's', 120], 'idNumber' => ['id_number', 's', 40], 'email' => ['email', 's', 120], 'phone' => ['phone', 's', 40],
+            'company' => ['company', 's', 120], 'nationality' => ['nationality', 's', 60], 'vehicleReg' => ['vehicle_reg', 's', 30],
+            'standingRequests' => ['standing_requests', 't'], 'dietary' => ['dietary', 's', 160], 'roomPreference' => ['room_preference', 's', 160],
+            'notes' => ['notes', 't'], 'vip' => ['vip', 'b'], 'stays' => ['stays', 'i'], 'lastStay' => ['last_stay', 'date'], 'example' => ['example', 'b'],
         ],
     ],
     'rooms' => [
@@ -55,7 +64,7 @@ const COLLECTIONS = [
 ];
 
 /** Which access area guards each record type. */
-const AREA_OF = ['bookings' => 'reservations', 'rooms' => 'rooms', 'tickets' => 'maintenance', 'schedules' => 'maintenance'];
+const AREA_OF = ['guests' => 'reservations', 'bookings' => 'reservations', 'rooms' => 'rooms', 'tickets' => 'maintenance', 'schedules' => 'maintenance'];
 const TICKET_ROOM_REASON = [
     'Plumbing' => 'Plumbing leak / blockage', 'Electrical' => 'Electrical fault', 'HVAC' => 'Air-con / HVAC failure',
     'Pest control' => 'Pest control treatment', 'Fire & safety' => 'Fire & safety compliance', 'Locks & access' => 'Door lock / access fault',
@@ -178,6 +187,12 @@ function load_state(array $user): array
         $st->execute([$since]);
         foreach ($st as $row) {
             $state['bookings'][$row['id']] = to_record('bookings', $row);
+        }
+    }
+    $state['guests'] = [];
+    if (can($user, 'reservations')) {
+        foreach ($pdo->query('SELECT * FROM guest_profiles ORDER BY last_stay DESC, guest_name LIMIT 5000') as $row) {
+            $state['guests'][$row['id']] = to_record('guests', $row);
         }
     }
     // Room condition is always loaded: availability checks need to know which rooms are offline.
@@ -352,6 +367,12 @@ function validate(string $coll, string $id, array &$rec, ?array $existing): void
         }
     }
 
+    if ($coll === 'guests') {
+        if (trim((string)($rec['guestName'] ?? '')) === '') {
+            throw new ApiError('Enter the guest’s name.');
+        }
+    }
+
     if ($coll === 'schedules') {
         if (trim((string)($rec['task'] ?? '')) === '') {
             throw new ApiError('Name the task.');
@@ -419,13 +440,153 @@ function apply_side_effects(string $coll, ?array $old, array $new, array $user):
     return $changed ? ['rooms' => $changed] : [];
 }
 
-function save_record(string $coll, string $id, array $data, string $mode, array $user, array &$also = []): array
+/* ---------------- guest profiles & saved special requests ---------------- */
+
+function req_lines(?string $text): array
+{
+    return array_values(array_filter(array_map('trim', preg_split('/\r?\n|;/', (string)$text) ?: []), fn($l) => $l !== ''));
+}
+
+/** Dietary and room-preference lines live in their own profile fields, so they are not saved as standing requests. */
+function standing_only(string $text): string
+{
+    return implode("\n", array_filter(req_lines($text), fn($l) => !preg_match('/^(dietary|room preference):/i', $l)));
+}
+
+/** Adds lines from $add that aren't already in $base (case-insensitive). */
+function merge_requests(string $base, string $add): string
+{
+    $have = req_lines($base);
+    $lower = array_map('mb_strtolower', $have);
+    foreach (req_lines($add) as $l) {
+        if (!in_array(mb_strtolower($l), $lower, true)) {
+            $have[] = $l;
+            $lower[] = mb_strtolower($l);
+        }
+    }
+    return implode("\n", $have);
+}
+
+/** Phone numbers compared in one format: digits only, South African 0XX… written as 27XX…. */
+function norm_phone(string $p): string
+{
+    $d = (string)preg_replace('/\D+/', '', $p);
+    if (strlen($d) === 10 && $d[0] === '0') {
+        $d = '27' . substr($d, 1);
+    }
+    return $d;
+}
+
+/** Finds a guest by ID/passport number, then email, then phone + surname. */
+function find_guest_profile(array $rec): ?array
+{
+    $pdo = db();
+    $idn = preg_replace('/\s+/', '', (string)($rec['idNumber'] ?? ''));
+    if (strlen($idn) >= 5) {
+        $st = $pdo->prepare('SELECT * FROM guest_profiles WHERE REPLACE(id_number, " ", "") = ? LIMIT 1');
+        $st->execute([$idn]);
+        if ($g = $st->fetch()) {
+            return $g;
+        }
+    }
+    $email = strtolower(trim((string)($rec['email'] ?? '')));
+    if (filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        $st = $pdo->prepare('SELECT * FROM guest_profiles WHERE LOWER(email) = ? LIMIT 1');
+        $st->execute([$email]);
+        if ($g = $st->fetch()) {
+            return $g;
+        }
+    }
+    $phone = norm_phone((string)($rec['phone'] ?? ''));
+    $name = trim((string)($rec['guestName'] ?? ''));
+    if (strlen($phone) >= 9 && $name !== '') {
+        $surname = mb_strtolower((string)preg_replace('/^.*\s/', '', $name));
+        $st = $pdo->prepare('SELECT * FROM guest_profiles WHERE phone <> "" LIMIT 20000');
+        $st->execute();
+        foreach ($st as $g) {
+            if (norm_phone($g['phone']) === $phone && str_ends_with(mb_strtolower($g['guest_name']), $surname)) {
+                return $g;
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * Links a booking to its guest profile (creating one the first time), copies the guest's saved
+ * special requests into a NEW booking, and optionally remembers this booking's requests on the profile.
+ * Returns a short note for the front desk, e.g. "Returning guest (3 previous stays): 2 saved requests added".
+ */
+function link_guest_profile(array &$rec, ?array $existing, array $user, bool $remember): string
+{
+    $pdo = db();
+    $g = null;
+    if (!empty($rec['guestId'])) {
+        $st = $pdo->prepare('SELECT * FROM guest_profiles WHERE id = ?');
+        $st->execute([$rec['guestId']]);
+        $g = $st->fetch() ?: null;
+    }
+    $g ??= find_guest_profile($rec);
+    $note = '';
+    if ($g) {
+        if ($existing === null) {
+            $saved = trim(implode("\n", array_filter([
+                (string)$g['standing_requests'],
+                $g['dietary'] ? 'Dietary: ' . $g['dietary'] : '',
+                $g['room_preference'] ? 'Room preference: ' . $g['room_preference'] : '',
+            ])));
+            $before = count(req_lines((string)($rec['specialRequests'] ?? '')));
+            $rec['specialRequests'] = merge_requests((string)($rec['specialRequests'] ?? ''), $saved);
+            $added = count(req_lines($rec['specialRequests'])) - $before;
+            $note = 'Returning guest' . ($g['stays'] ? ' (' . (int)$g['stays'] . ' previous stay' . ((int)$g['stays'] === 1 ? '' : 's') . ')' : '') . ($g['vip'] ? ', VIP' : '')
+                . ($added ? ": {$added} saved request" . ($added === 1 ? '' : 's') . ' added to this booking' : '');
+        }
+        // Fill gaps in the profile from this booking; never overwrite what staff already recorded.
+        $fill = [];
+        foreach (['id_number' => 'idNumber', 'email' => 'email', 'phone' => 'phone', 'company' => 'company', 'nationality' => 'nationality', 'vehicle_reg' => 'vehicleReg'] as $col => $key) {
+            if (trim((string)$g[$col]) === '' && trim((string)($rec[$key] ?? '')) !== '') {
+                $fill[$col] = mb_substr(trim((string)$rec[$key]), 0, 120);
+            }
+        }
+        if ($remember && trim((string)($rec['specialRequests'] ?? '')) !== '') {
+            $fill['standing_requests'] = merge_requests((string)$g['standing_requests'], standing_only((string)$rec['specialRequests']));
+        }
+        if ($fill) {
+            $set = implode(', ', array_map(fn($c) => "`$c` = ?", array_keys($fill)));
+            $pdo->prepare("UPDATE guest_profiles SET $set, updated_by = ? WHERE id = ?")->execute([...array_values($fill), $user['id'], $g['id']]);
+        }
+        $rec['guestId'] = $g['id'];
+    } elseif (trim((string)($rec['guestName'] ?? '')) !== '' && empty($rec['groupRef'])
+        && (trim((string)($rec['idNumber'] ?? '')) !== '' || trim((string)($rec['email'] ?? '')) !== '' || trim((string)($rec['phone'] ?? '')) !== '')) {
+        // First stay: start a profile so the guest is recognised next time.
+        $gid = 'g_' . bin2hex(random_bytes(8));
+        $pdo->prepare('INSERT INTO guest_profiles (id, guest_name, id_number, email, phone, company, nationality, vehicle_reg, standing_requests, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            ->execute([$gid, mb_substr(trim((string)$rec['guestName']), 0, 120), trim((string)($rec['idNumber'] ?? '')), trim((string)($rec['email'] ?? '')), trim((string)($rec['phone'] ?? '')),
+                trim((string)($rec['company'] ?? '')), trim((string)($rec['nationality'] ?? '')), trim((string)($rec['vehicleReg'] ?? '')),
+                $remember ? standing_only((string)($rec['specialRequests'] ?? '')) : '', $user['id']]);
+        $rec['guestId'] = $gid;
+        $note = 'New guest profile created';
+    }
+    return $note;
+}
+
+/** Stays = current or completed stays; last stay = latest check-in that actually happened. */
+function refresh_guest_stats(string $guestId): void
+{
+    db()->prepare("UPDATE guest_profiles g SET stays = (SELECT COUNT(*) FROM bookings b WHERE b.guest_id = g.id AND b.status IN ('Checked-in','Checked-out')),
+        last_stay = (SELECT MAX(check_in) FROM bookings b WHERE b.guest_id = g.id AND b.status IN ('Checked-in','Checked-out')) WHERE g.id = ?")->execute([$guestId]);
+}
+
+function save_record(string $coll, string $id, array $data, string $mode, array $user, array &$also = [], bool $notify = true): array
 {
     collection($coll);
     check_id($id);
     require_area($user, $coll, 'edit');
     $pdo = db();
-    $pdo->beginTransaction();
+    $own = !$pdo->inTransaction(); // group bookings run many saves inside one transaction
+    if ($own) {
+        $pdo->beginTransaction();
+    }
     try {
         $row = fetch_row($coll, $id, true);
         if ($coll === 'rooms' && !$row) {
@@ -437,19 +598,212 @@ function save_record(string $coll, string $id, array $data, string $mode, array 
             $rec = array_merge($existing, $rec);
         }
         validate($coll, $id, $rec, $existing);
+        $guestNote = '';
+        if ($coll === 'bookings') {
+            $guestNote = link_guest_profile($rec, $existing, $user, !empty($data['saveRequests']) || (!array_key_exists('saveRequests', $data) && $existing === null));
+        }
         $cols = to_columns($coll, $rec);
         write_row($coll, $id, $cols, $row !== null, $user);
         $changes = $existing ? array_diff_assoc(array_map('strval', array_intersect_key($rec, $existing)), array_map('strval', $existing)) : $rec;
         audit($user, $coll, $id, $row ? 'update' : 'create', $changes);
         $saved = to_record($coll, fetch_row($coll, $id));
-        notify_change($coll, $existing, $saved + ['__id' => $id], $user);
-        $also = apply_side_effects($coll, $existing, $saved, $user);
+        if ($coll === 'bookings' && $saved['guestId'] !== '') {
+            refresh_guest_stats($saved['guestId']);
+            $g = fetch_row('guests', $saved['guestId']);
+            if ($g) {
+                $also['guests'] = [$saved['guestId'] => to_record('guests', $g)];
+            }
+        }
+        if ($guestNote !== '') {
+            $also['_note'] = $guestNote;
+        }
+        if ($notify) {
+            notify_change($coll, $existing, $saved + ['__id' => $id], $user);
+        }
+        $also = array_merge($also, apply_side_effects($coll, $existing, $saved, $user));
+        if ($own) {
+            $pdo->commit();
+        }
+    } catch (Throwable $e) {
+        if ($own) {
+            $pdo->rollBack();
+        }
+        throw $e;
+    }
+    return $saved;
+}
+
+/* ---------------- bulk (group) bookings ---------------- */
+
+const ROOM_TYPES = ['Single', 'Double', 'Twin', 'Suite', 'Accessible'];
+
+/**
+ * Picks available rooms for a group. Rooms in the preferred blocks come first, and rooms are taken
+ * block by block, floor by floor, so a group stays together as far as availability allows.
+ * $counts: ['Single' => 10, 'Double' => 4, ...]. Returns ['rooms' => [id => type], 'short' => [type => missing]].
+ */
+function allocate_group(string $ci, string $co, array $counts, array $preferBlocks = [], bool $lock = false): array
+{
+    if (!valid_date($ci) || !valid_date($co) || $co <= $ci) {
+        throw new ApiError('Check-out must be at least one day after check-in.');
+    }
+    $sql = "SELECT r.id, r.block, r.floor, r.room_type FROM rooms r
+        WHERE NOT (r.service <> 'in' AND (r.since IS NULL OR r.since < ?) AND (r.expected_return IS NULL OR r.expected_return > ?))
+          AND NOT EXISTS (SELECT 1 FROM bookings b WHERE b.room_id = r.id AND b.status IN ('Provisional','Confirmed','Checked-in') AND b.check_in < ? AND b.check_out > ?)
+        ORDER BY r.block, r.floor, r.id" . ($lock ? ' FOR UPDATE' : '');
+    $st = db()->prepare($sql);
+    $st->execute([$co, $ci, $co, $ci]);
+    $free = [];
+    foreach ($st as $r) {
+        $free[$r['room_type']][] = $r;
+    }
+    $prefer = array_values(array_intersect(['A', 'B', 'C', 'D', 'E', 'F'], array_map('strtoupper', $preferBlocks)));
+    $picked = [];
+    $short = [];
+    foreach ($counts as $type => $n) {
+        $n = (int)$n;
+        if ($n <= 0) {
+            continue;
+        }
+        if (!in_array($type, ROOM_TYPES, true)) {
+            throw new ApiError("Unknown room type “{$type}”.");
+        }
+        $cands = $free[$type] ?? [];
+        // Prefer the chosen blocks, then whichever block/floor has the most free rooms of this type (keeps the group together).
+        $perFloor = [];
+        $perBlock = [];
+        foreach ($cands as $c) {
+            $perFloor[$c['block'] . $c['floor']] = ($perFloor[$c['block'] . $c['floor']] ?? 0) + 1;
+            $perBlock[$c['block']] = ($perBlock[$c['block']] ?? 0) + 1;
+        }
+        // Order: preferred blocks first, then the block with the most free rooms, then its fullest-free floors.
+        $key = fn($r) => [in_array($r['block'], $prefer, true) ? array_search($r['block'], $prefer, true) : 99,
+            -$perBlock[$r['block']], $r['block'], -$perFloor[$r['block'] . $r['floor']], $r['floor'], $r['id']];
+        usort($cands, fn($a, $b) => $key($a) <=> $key($b));
+        foreach (array_slice($cands, 0, $n) as $c) {
+            $picked[$c['id']] = $type;
+        }
+        if (count($cands) < $n) {
+            $short[$type] = $n - count($cands);
+        }
+    }
+    return ['rooms' => $picked, 'short' => $short, 'available' => array_map('count', $free)];
+}
+
+/** Books many rooms for one client in a single transaction: all rooms are booked, or none. */
+function bulk_book(array $in, array $user): array
+{
+    require_area($user, 'bookings', 'edit');
+    $client = trim((string)($in['company'] ?? ''));
+    if ($client === '') {
+        throw new ApiError('Enter the client or company name.');
+    }
+    $ci = (string)($in['checkIn'] ?? '');
+    $co = (string)($in['checkOut'] ?? '');
+    $rooms = array_values(array_unique(array_filter(array_map('strval', (array)($in['roomIds'] ?? [])))));
+    if (!$rooms) {
+        throw new ApiError('No rooms were selected. Use “Find rooms” first.');
+    }
+    if (count($rooms) > 600) {
+        throw new ApiError('A group booking can have at most 600 rooms.');
+    }
+    $names = array_values(array_filter(array_map('trim', (array)($in['guestNames'] ?? []))));
+    $rates = (array)($in['rates'] ?? []);
+    $status = in_array($in['status'] ?? '', ['Provisional', 'Confirmed'], true) ? $in['status'] : 'Confirmed';
+    $contact = trim((string)($in['contact'] ?? ''));
+    $pdo = db();
+    $groupRef = unique_code('bookings', 'group_ref', 'GRP-' . date('ymd') . '-');
+    $records = [];
+    $also = [];
+    $pdo->beginTransaction();
+    try {
+        foreach ($rooms as $k => $roomId) {
+            $room = fetch_row('rooms', $roomId);
+            if (!$room) {
+                throw new ApiError("Room {$roomId} does not exist.");
+            }
+            $id = 'b_' . bin2hex(random_bytes(8));
+            $data = [
+                'guestName' => $names[$k] ?? (($contact ?: $client) . ' · guest ' . ($k + 1)),
+                'company' => $client, 'guestType' => in_array($in['guestType'] ?? '', ['Group', 'Corporate', 'Contractor', 'Student', 'Staff', 'Individual'], true) ? $in['guestType'] : 'Group',
+                'phone' => (string)($in['phone'] ?? ''), 'email' => (string)($in['email'] ?? ''),
+                'emergencyName' => $contact, 'roomId' => $roomId, 'checkIn' => $ci, 'checkOut' => $co,
+                'arrivalTime' => (string)($in['arrivalTime'] ?? ''), 'departureTime' => (string)($in['departureTime'] ?? '10:00'),
+                'adults' => 1, 'children' => 0,
+                'rate' => isset($rates[$room['room_type']]) && (float)$rates[$room['room_type']] > 0 ? (float)$rates[$room['room_type']] : (float)$room['rate'],
+                'deposit' => 0, 'payment' => (string)($in['payment'] ?? 'Company account'), 'billingRef' => (string)($in['billingRef'] ?? ''),
+                'source' => (string)($in['source'] ?? 'Corporate account'), 'status' => $status,
+                'specialRequests' => (string)($in['specialRequests'] ?? ''), 'notes' => trim('Group booking ' . $groupRef . ($contact ? " · contact {$contact}" : '') . '. ' . (string)($in['notes'] ?? '')),
+                'groupRef' => $groupRef,
+            ];
+            $records[$id] = save_record('bookings', $id, $data, 'set', $user, $also, false);
+        }
+        $total = array_sum(array_map(fn($r) => (float)$r['total'], $records));
+        $byType = array_count_values(array_map(fn($r) => $r['roomType'], $records));
+        $nights = (int)((strtotime($co) - strtotime($ci)) / 86400);
+        queue_email('notice', "Group booking {$groupRef}: " . count($records) . " rooms for {$client}",
+            ($user['full_name'] ?: $user['username']) . ' made a group booking.',
+            [['title' => 'Group', 'pairs' => [['Group reference', $groupRef], ['Client', $client], ['Contact', $contact ?: '—'], ['Phone', (string)($in['phone'] ?? '') ?: '—'],
+                ['Stay', d_fmt($ci) . ' → ' . d_fmt($co) . " ({$nights} nights)"], ['Rooms', count($records) . ' (' . implode(', ', array_map(fn($t, $c) => "$c $t", array_keys($byType), $byType)) . ')'],
+                ['Status', $status], ['Total value', 'R ' . number_format($total, 2)], ['PO / billing reference', (string)($in['billingRef'] ?? '') ?: '—']]],
+             ['title' => 'Rooms', 'head' => ['Room', 'Type', 'Guest', 'Rate'], 'rows' => array_map(fn($r) => [$r['roomId'], $r['roomType'], $r['guestName'], 'R ' . number_format((float)$r['rate'], 2)], array_values($records))]]);
+        audit($user, 'bookings', $groupRef, 'group-create', ['rooms' => count($records), 'client' => $client]);
         $pdo->commit();
     } catch (Throwable $e) {
         $pdo->rollBack();
         throw $e;
     }
-    return $saved;
+    return ['groupRef' => $groupRef, 'records' => $records];
+}
+
+/** Check in, check out or cancel every booking in a group that can make that move. One summary email. */
+function group_status(string $groupRef, string $action, array $user): array
+{
+    require_area($user, 'bookings', 'edit');
+    $moves = ['checkin' => [['Provisional', 'Confirmed'], 'Checked-in'], 'checkout' => [['Checked-in'], 'Checked-out'], 'cancel' => [['Provisional', 'Confirmed'], 'Cancelled']];
+    if (!isset($moves[$action]) || !preg_match('/^GRP-[A-Z0-9-]{3,25}$/', $groupRef)) {
+        throw new ApiError('Unknown group action.');
+    }
+    [$fromStatuses, $to] = $moves[$action];
+    $pdo = db();
+    $in = implode(',', array_fill(0, count($fromStatuses), '?'));
+    $st = $pdo->prepare("SELECT id FROM bookings WHERE group_ref = ? AND status IN ($in)");
+    $st->execute([$groupRef, ...$fromStatuses]);
+    $ids = $st->fetchAll(PDO::FETCH_COLUMN);
+    if (!$ids) {
+        throw new ApiError('No bookings in this group can be moved to ' . strtolower($to) . '.');
+    }
+    $records = [];
+    $rooms = [];
+    $pdo->beginTransaction();
+    try {
+        foreach ($ids as $id) {
+            $upd = ['status' => $to];
+            if ($to === 'Checked-in') {
+                $upd['checkedInAt'] = today();
+            }
+            if ($to === 'Checked-out') {
+                $upd['checkedOutAt'] = today();
+                $cur = to_record('bookings', fetch_row('bookings', $id));
+                if ($cur['checkOut'] > today()) {
+                    $upd['checkOut'] = today();
+                }
+            }
+            $also = [];
+            $records[$id] = save_record('bookings', $id, $upd, 'update', $user, $also, false);
+            $rooms += $also['rooms'] ?? [];
+        }
+        $first = reset($records);
+        queue_email('notice', "Group {$groupRef} " . ['checkin' => 'checked in', 'checkout' => 'checked out', 'cancel' => 'cancelled'][$action] . ': ' . count($records) . " rooms ({$first['company']})",
+            ($user['full_name'] ?: $user['username']) . ' updated the whole group to ' . $to . '.',
+            [['title' => 'Rooms', 'head' => ['Room', 'Guest', 'Stay', 'Status'], 'rows' => array_map(fn($r) => [$r['roomId'], $r['guestName'], d_fmt($r['checkIn']) . ' → ' . d_fmt($r['checkOut']), $r['status']], array_values($records))]]);
+        audit($user, 'bookings', $groupRef, 'group-' . $action, ['rooms' => count($records)]);
+        $pdo->commit();
+    } catch (Throwable $e) {
+        $pdo->rollBack();
+        throw $e;
+    }
+    return ['records' => $records, 'also' => $rooms ? ['rooms' => $rooms] : []];
 }
 
 function delete_record(string $coll, string $id, array $user): void
@@ -520,6 +874,26 @@ function load_examples(array $data, array $user): int
                 $n++;
             }
         }
+        // Example guest profiles: 150 guests with stays on record, many with saved requests.
+        $reqs = ['Ground floor room', 'Extra pillows', 'Late arrival (after 21:00)', 'Early breakfast at 05:00', 'Quiet room away from the lifts', 'Extra blanket',
+            'Packed lunch every day', 'Iron and ironing board in room', 'Room near the parking area', 'Twin beds instead of double'];
+        $diet = ['', '', '', 'Halaal', 'Vegetarian', 'Diabetic', 'No pork', 'Gluten free', 'Lactose intolerant'];
+        $pick = $pdo->query("SELECT id, guest_name, id_number, email, phone, company, nationality, vehicle_reg FROM bookings
+            WHERE example = 1 AND status IN ('Checked-in','Checked-out') ORDER BY id LIMIT 150")->fetchAll();
+        $gi = $pdo->prepare('INSERT INTO guest_profiles (id, guest_name, id_number, email, phone, company, nationality, vehicle_reg, standing_requests, dietary, room_preference, vip, example)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)');
+        $link = $pdo->prepare('UPDATE bookings SET guest_id = ? WHERE id = ?');
+        foreach ($pick as $k => $b) {
+            $gid = 'g_ex' . $k;
+            $standing = $k % 3 === 2 ? '' : implode("\n", array_slice($reqs, $k % count($reqs), 1 + $k % 2));
+            $gi->execute([$gid, $b['guest_name'], $b['id_number'], $b['email'], $b['phone'], $b['company'], $b['nationality'], $b['vehicle_reg'], $standing,
+                $diet[$k % count($diet)], $k % 5 === 0 ? 'Block A, low floor' : '', $k % 17 === 0 ? 1 : 0]);
+            $link->execute([$gid, $b['id']]);
+            refresh_guest_stats($gid);
+            $n++;
+        }
+        require_once __DIR__ . '/ops.php';
+        $n += load_ops_examples($user); // stock, purchase orders, meals, temperature checks, cleaning
         audit($user, 'system', 'examples', 'load', ['records' => $n]);
         $pdo->commit();
     } catch (Throwable $e) {
@@ -535,7 +909,16 @@ function clear_examples(array $user): int
     $n = 0;
     $pdo->beginTransaction();
     try {
-        foreach (['bookings', 'maintenance_tickets', 'maintenance_schedules', 'finance_expenses'] as $t) {
+        // Operations data first (child rows before their parents).
+        foreach (['cleaning_log', 'cleaning_tasks', 'kitchen_checks', 'meal_plans'] as $t) {
+            $n += $pdo->exec("DELETE FROM `$t` WHERE example = 1");
+        }
+        $n += $pdo->exec('DELETE l FROM purchase_order_lines l JOIN purchase_orders p ON p.id = l.po_id WHERE p.example = 1');
+        // Lines on real orders that point at example items go too (the items are being removed); empty orders are then dropped.
+        $n += $pdo->exec('DELETE l FROM purchase_order_lines l JOIN stock_items i ON i.id = l.item_id WHERE i.example = 1');
+        $n += $pdo->exec('DELETE FROM purchase_orders WHERE example = 1 OR id NOT IN (SELECT po_id FROM purchase_order_lines)');
+        $n += $pdo->exec('DELETE FROM stock_items WHERE example = 1'); // movements go with them (ON DELETE CASCADE)
+        foreach (['bookings', 'maintenance_tickets', 'maintenance_schedules', 'finance_expenses', 'guest_profiles'] as $t) {
             $n += $pdo->exec("DELETE FROM `$t` WHERE example = 1");
         }
         $n += $pdo->exec("UPDATE rooms SET service='in', hk='Clean', reason='', reason_detail=NULL, since=NULL, expected_return=NULL, example=0 WHERE example = 1");
