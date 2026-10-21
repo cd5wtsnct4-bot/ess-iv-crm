@@ -62,6 +62,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $recipients = setting('alert_recipients', DEFAULT_ALERT_EMAIL);
+$demoMail = ($CONFIG['mail']['transport'] ?? '') === 'log';
+// Read one email in full (the "demo mailbox", and handy for checking what recipients receive).
+if (isset($_GET['view'])) {
+    $st = db()->prepare('SELECT * FROM email_queue WHERE id = ?');
+    $st->execute([(int)$_GET['view']]);
+    $mail = $st->fetch();
+    page_open('Email · ESS IV CRM');
+    echo '<main class="wrap" style="padding-block:24px 40px;display:flex;flex-direction:column;gap:14px;max-width:900px"><div class="topbar" style="padding:0"><div class="brand"><h1>ESS IV</h1><span>Email</span></div><a class="btn" href="settings.php#log">Back to the email log</a></div>';
+    if ($mail) {
+        echo '<section class="panel"><dl class="kv"><dt>Subject</dt><dd><b>' . h($mail['subject']) . '</b></dd><dt>To</dt><dd>' . h(str_replace(',', ', ', $mail['recipients'])) . '</dd><dt>Queued</dt><dd>' . h($mail['created_at']) . '</dd><dt>Status</dt><dd>' . h($mail['status']) . ($demoMail ? ' (demo: kept in this mailbox, not sent)' : '') . '</dd></dl></section>';
+        echo '<iframe title="Email content" sandbox="" style="width:100%;height:70vh;border:1px solid var(--line);border-radius:8px;background:#fff" srcdoc="' . h($mail['body_html']) . '"></iframe>';
+    } else {
+        echo '<div class="empty">That email no longer exists.</div>';
+    }
+    echo '</main>';
+    page_close();
+    exit;
+}
 $log = db()->query('SELECT id, created_at, kind, subject, recipients, status, attempts, last_error, sent_at FROM email_queue ORDER BY id DESC LIMIT 60')->fetchAll();
 $counts = db()->query('SELECT status, COUNT(*) n FROM email_queue GROUP BY status')->fetchAll(PDO::FETCH_KEY_PAIR);
 $lastCheck = setting('last_alert_check');
@@ -100,10 +118,11 @@ page_open('Email alerts · ESS IV CRM');
     <p class="muted" style="margin-bottom:0">Alerts are checked automatically every 10 minutes while anyone has the CRM open. For alerts around the clock, add the scheduled task (cron job) described in DEPLOY.md.</p>
   </section>
 
-  <section class="panel"><div class="panel-head"><h2 class="grow">Email log</h2><span class="chip">latest 60</span></div>
+  <section class="panel" id="log"><div class="panel-head"><h2 class="grow"><?= $demoMail ? 'Demo mailbox' : 'Email log' ?></h2><span class="chip">latest 60 · click a subject to read it</span></div>
+    <?php if ($demoMail): ?><p class="muted" style="margin-top:0">This is a demo system: alert and notification emails are kept here instead of being sent. On a real installation they go to the recipients above.</p><?php endif ?>
     <div class="tablewrap"><table><thead><tr><th>Queued</th><th>Type</th><th>Subject</th><th>To</th><th>Status</th></tr></thead><tbody>
     <?php foreach ($log as $m): ?>
-      <tr><td class="mono"><?= h(date('j M H:i', strtotime($m['created_at']))) ?></td><td><?= h($m['kind']) ?></td><td><?= h($m['subject']) ?><?php if ($m['last_error']): ?><div class="err" style="font-size:12px"><?= h($m['last_error']) ?></div><?php endif ?></td><td style="font-size:12px"><?= h(str_replace(',', ', ', $m['recipients'])) ?></td>
+      <tr><td class="mono"><?= h(date('j M H:i', strtotime($m['created_at']))) ?></td><td><?= h($m['kind']) ?></td><td><a href="settings.php?view=<?= (int)$m['id'] ?>"><?= h($m['subject']) ?></a><?php if ($m['last_error']): ?><div class="err" style="font-size:12px"><?= h($m['last_error']) ?></div><?php endif ?></td><td style="font-size:12px"><?= h(str_replace(',', ', ', $m['recipients'])) ?></td>
       <td><span class="pill <?= ['sent' => 's-vac', 'pending' => 's-dirty', 'failed' => 's-oos'][$m['status']] ?>"><?= h($m['status']) ?></span></td></tr>
     <?php endforeach ?>
     </tbody></table><?php if (!$log): ?><div class="empty">No emails yet.</div><?php endif ?></div>

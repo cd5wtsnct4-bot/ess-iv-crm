@@ -6,7 +6,7 @@ declare(strict_types=1);
  * mail server is down) and sent by flush_email_queue(), which cron.php and the API call.
  *
  * config.php → 'mail' => [
- *   'transport' => 'smtp' | 'mail',     // 'mail' uses PHP's mail() function
+ *   'transport' => 'smtp' | 'mail' | 'log',   // 'mail' uses PHP's mail(); 'log' keeps emails in the in-app mailbox only (demo)
  *   'from' => 'crm@yourdomain.co.za', 'from_name' => 'ESS IV CRM',
  *   'smtp_host' => 'mail.yourdomain.co.za', 'smtp_port' => 465,
  *   'smtp_secure' => 'ssl' | 'tls' | '', 'smtp_user' => '...', 'smtp_pass' => '...',
@@ -177,6 +177,9 @@ function send_mail(array $to, string $subject, string $text, string $html): void
     $fromName = $m['from_name'] ?? 'ESS IV CRM';
     [$headers, $body] = mime_message($to, $subject, $text, $html, $from, $fromName);
 
+    if (($m['transport'] ?? 'mail') === 'log') {
+        return; // demo: the message stays in email_queue and can be read under Email alerts
+    }
     if (($m['transport'] ?? 'mail') === 'smtp') {
         smtp_send($m, $from, $to, $headers, $body);
         return;

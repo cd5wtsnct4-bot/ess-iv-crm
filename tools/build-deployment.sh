@@ -28,7 +28,7 @@ mkdir -p "$PKG"
 # Copy production files only.
 rsync -a "$ROOT/" "$PKG/" \
   --exclude '.git/' --exclude '.github/' --exclude '.devcontainer/' --exclude 'docs/' \
-  --exclude 'scripts/' --exclude 'tools/' --exclude '.gitignore' --exclude '.DS_Store' \
+  --exclude 'scripts/' --exclude 'tools/' --exclude 'demo/' --exclude 'render.yaml' --exclude '.dockerignore' --exclude '.gitignore' --exclude '.DS_Store' \
   --exclude 'config.php' --exclude 'install.lock' --exclude '*.log' --exclude 'README.md'
 
 # Every PHP file must parse.

@@ -4,6 +4,25 @@ A web system for managing the 600-room ESS IV accommodation. It covers reservati
 
 ## Try it live
 
+### Full live demo for clients: one public link, no sign-up for viewers
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/cd5wtsnct4-bot/ess-iv-crm)
+
+This runs the **complete system**: PHP and a MySQL-compatible database, with every module and example data loaded automatically.
+
+1. Click **Deploy to Render**, then sign in to Render with your GitHub account. The free plan is enough.
+2. Click **Deploy Blueprint**. The first build takes about 5–8 minutes.
+3. Render gives the demo a public address, such as `https://ess-iv-crm-demo.onrender.com`. Send that link to your client.
+4. On the sign-in page, the client clicks **Use** next to any department (admin, front desk, housekeeping, maintenance, kitchen, finance) to see what that team sees.
+
+How the demo behaves:
+
+- **Emails stay inside the demo.** Every alert and notification is kept in the **Demo mailbox**: sign in as `admin`, then click **Email alerts**. Nothing is sent to real inboxes.
+- **It sleeps when idle.** On the free plan, the demo goes to sleep after about 15 minutes without visitors. The next visit wakes it in about a minute, with fresh example data, so every client starts from the same state.
+- **Run it on your own computer** with Docker: `docker build -f demo/Dockerfile -t ess-iv-crm-demo . && docker run --rm -p 8080:8080 ess-iv-crm-demo`, then open http://localhost:8080.
+
+### Other ways to look
+
 | Demo | What you get | Link |
 |---|---|---|
 | **Quick look** (in your browser, nothing to install) | The CRM screens with example data: dashboard and alerts, booking calendar, reservations, check-in/out, room status, maintenance. Changes stay in your browser. | **https://cd5wtsnct4-bot.github.io/ess-iv-crm/** |

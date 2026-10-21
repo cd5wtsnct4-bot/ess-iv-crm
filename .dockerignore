@@ -1,0 +1,8 @@
+.git
+.devcontainer
+docs
+tools
+config.php
+install.lock
+*.log
+.DS_Store

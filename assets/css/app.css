@@ -205,3 +205,8 @@ ul.plain{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;g
 .roomchk small{flex-basis:100%;color:var(--muted);font-size:11px}
 .roomchk.urgent{border-color:var(--oos);border-width:2px}
 .bars .b i.fc{position:absolute;left:-1px;right:-1px;height:2px;background:var(--fg);display:block}
+
+/* ---- demo sign-in panel ---- */
+.demo-logins{border-top:1px solid var(--line);padding-top:14px;display:flex;flex-direction:column;gap:8px}
+.demo-logins h3{color:var(--fg)}
+.demo-logins p{margin:0}

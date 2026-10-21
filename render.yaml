@@ -1,0 +1,15 @@
+# One-click live demo on Render (https://render.com). Click "Deploy to Render" in README.md.
+# Free plan: the demo sleeps after ~15 minutes without visitors and wakes on the next visit
+# (about a minute); example data is reloaded fresh each time it wakes.
+services:
+  - type: web
+    name: ess-iv-crm-demo
+    runtime: docker
+    plan: free
+    dockerfilePath: ./demo/Dockerfile
+    dockerContext: .
+    healthCheckPath: /login.php
+    autoDeploy: true
+    envVars:
+      - key: DEMO_DB_PASSWORD
+        generateValue: true

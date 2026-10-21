@@ -20,6 +20,7 @@ return [
     'app_url' => '${URL}',
     'cron_key' => '${KEY}',
     'debug' => true,
+    'demo' => true,
     // All emails are caught by Mailpit (the "Demo mailbox" port); nothing is sent to the internet.
     'mail' => ['transport' => 'smtp', 'from' => 'crm@ess4-demo.local', 'from_name' => 'ESS IV CRM (demo)',
                'smtp_host' => 'mail', 'smtp_port' => 1025, 'smtp_secure' => '', 'smtp_user' => '', 'smtp_pass' => ''],

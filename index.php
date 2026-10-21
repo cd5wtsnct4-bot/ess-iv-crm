@@ -18,6 +18,7 @@ page_open('ESS IV Accommodation CRM');
     <div class="topbar">
       <div class="brand"><h1>ESS IV</h1><span>Accommodation CRM · 600 rooms</span></div>
       <span class="chip" id="modeChip">Connecting…</span>
+      <?php if (!empty($CONFIG['demo'])): ?><span class="chip" style="background:var(--arr-soft);color:var(--arr);border-color:var(--arr)" title="Demo data resets when the demo restarts">Demo system</span><?php endif ?>
       <span class="today" id="todayLbl"></span>
       <button class="btn" id="bulkBtn">Bulk booking</button>
       <button class="btn primary" id="newBookingBtn">New reservation</button>
