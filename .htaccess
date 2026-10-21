@@ -3,7 +3,7 @@ Options -Indexes
 DirectoryIndex index.php
 
 # Never serve configuration, lock, SQL or documentation files.
-<FilesMatch "^(config\.php|config\.sample\.php|install\.lock|DEPLOY\.md|README\.md)$|\.(sql|log|lock)$">
+<FilesMatch "^(config\.php|config\.sample\.php|install\.lock|DEPLOY\.md|DEVELOPER\.md|README\.md|render\.yaml)$|\.(sql|log|lock|md|yaml)$">
   Require all denied
 </FilesMatch>
 
